@@ -1,0 +1,21 @@
+/menu -> Frage "Wie möchtest Du fortfahren?" -> Buttons: bestehendes Profil (1), ohne Einschränkung (2), neues Profil (3), (Mein Profil?) (4)
+
+der ganze loop läuft em Ende zusammen. wo unten [Ende] definiert ist kommt direkt die Frage "Anzahl und Aufwand der Gerichte?" und der ganze vorangehende teil des gerichte loops wird gelöscht. sprich ab Nachricht "Wie möchtest Du fortfahren?" inkl. den Buttons bis zur letzten Nachricht dieses Loops alle nachrichten löschen.
+
+(1) bestehendes Profil: sofern ein Profil vorhanden ist, wird dieses benutzt um weiterzufahren -> [Ende] / falls kein Profil vorhanden ist: "Es besteht noch kein Profil. Erstelle eines!" -> dann weiter analog "neu festlegen" (3)
+
+(2) ohne Einschränkung: direkt [Ende]
+
+(3) neues Profil: user kann ein neues profil anlegen. falls bereits eines vorhanden ist wird das gelöscht und neu angelegt. es folgen (a), (b), (c) und danch geht es weiter bei "Dein Profil" mit der Übersicht (siehe (4))
+
+(4) mein Profil: übersicht des gespeicherten Profils: "Dein Profil" und darunter: "Einschränkungen: \n Stil: \ Schwere". Darunter Buttons: "Neu anlegen" und "Weiter -> Weiter direk tin [Ende] / "Neu Anlegen" -> start direkt bei (a) und weiter analog "Neues Profil"
+
+
+(a) "Einschränkungen:" (Einfachauswahl) mit 4 Buttons: Vegi | Vegan | Carnivor | offen
+(b) "Stil:" (Mehrfachauswahl): Klassisch | Mediteran | Asiatisch | Orientalisch | Süss |Fertig
+(c) "Schwere: (von Leicht bis Deftig): (Einfacha uswahl) mit Buttons: 1 | 2 | 3 | 4 | 5 | 6 | 7
+
+-> (a), (b), (c) greifen auf Gerichtedatenbank aus Google Sheets, Sheet "Gerichte" zu.
+    (a) auf Spalte F "Einschränkung"
+    (b) auf Spalte E "Stil"
+    (c) auf Spalte C "Art" -> 1 = nur Gerichte mit "leicht", 2 = 2/3 leicht und 1/3 mittel, 3 = 2/6 leicht & 3/6 mittel & 1/6 schwer, 4 = +/-ausgeglichen von allen, 5 = 2/6 schwer & 3/6 mittel und 1/6 leicht, 6 = 2/3 schwer / 1/3 mittel, 7 = nur schwere Gerichte

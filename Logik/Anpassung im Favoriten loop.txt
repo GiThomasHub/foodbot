@@ -1,0 +1,22 @@
+Anpassung im Favoriten loop:
+
+alles gleich bis anzeige der aktuellen Favoriten: "Deine Favoriten:"
+
+Dann neu als Nachricht inkl. Buttons:
+Was möchtest Du machen?
+- Favoriten für Gerichteauswahl selektieren?
+- Favoriten aus Liste entfernen?
+- Zurück zum Hauptmenu?
+
+Darunter die drei Buttons: Selektieren | Entfernen | Zurück
+
+"Entfernen" -> gleich wie bisher bei "Ja" auf die Frage "Favoriten entfernen?"
+"Zurück" -> gleich wie bisher bei "Nein" auf die Frage "Favoriten entfernen?"
+"Selektieren" -> 
+
+1) "Welche Favoriten möchtest Du Deiner Gerichteliste hinzufügen?" sowie die liste mit den Favoriten, nummeriert von 1 - … analog "Entfernen" teil
+2) "Wähle Nummern (Mehrfachauswahl) und klicke »Fertig«:" sowie zahlenbuttons analog "Entfernen" teil
+3) wenn Favoriten ausgewählt, werden diese gerichte entsprechend für die aktuelle session festgehalten und loop kehrt zurück ins Hauptmenü analog "Zurück" teil
+	hier: wenn anzahl gewählter gerichte > selektiere Favoriten: auffüllen analog der Kriterien wie normal
+		wenn anzahl gewählter gerichte = selektierte Favoriten: genau selektierte Favoriten zeigen, Kriterien und vorgaben haben keinen einfluss
+		wenn anzahl gewählter gerichte < selektierte Favoriten: zufällig aus den selektierten Favoriten die entsprechende anzahl gerichte anzeigen

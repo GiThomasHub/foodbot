@@ -1,0 +1,18 @@
+nun wird eine neue Funktion eingeführt: "QuickOne"
+
+Idee ist, dass wenn man nur ein gericht sucht, nicht durch den ganzen Prozess durchklicken muss, sondern kurz "QuickOne" und los geht's.
+
+Ablauf: Button "QuickOne" überall einfügen wo aktuell Menü, Favoriten, Übersicht Buttons stehen.
+
+Funktion:
+
+klicke "QuickOne" -> direkt ein gericht vorgeschlagen (keine Präferenz aus dem Profil, keine spezifikatoin betreffend aufwand). wenn beilagen für das gericht vorhanden, direkt beilagen gemäss der vorhandenen logik hinzufügen (bspw "Stroganoff mit Nudeln und Spinat"). 99: eine Kohlenhydrat und eine Gemüse beilage, 88: nur eine Kohlenhydrate beilage, 77: nur eine Gemüse beilage, spezifisch: eine der möglichen beilagen.
+-> frage direkt nach dem vorschlag: "Passt das?" und darunter 2 oder 3 Buttons: 3 Buttons bei gerichten, welche beilage/n haben: "Passt", "Alles neu", "Beilagen neu" / 2 Buttons bei gerichten ohne beilage:"Passt", "Neu"
+
+"Passt" -> gerichtvorschlag nachricht bleibt bestehen und es geht direkt weiter in "Gut, Deine Auswahl steht. Für wieviele Personen..."
+
+"Neu" / "Alles Neu" -> gerichtvorschlag und Buttons werden gelöscht und start wieder gleich, wie wenn man "QuickOne" anklickt (Gericht vorgeschlagen und "Passt das?" und 2 oder 3 Buttons)
+
+"Beilagen neu" -> gerichtvorschlag und Buttons werden gelöscht. Gericht bleibt bestehen aber neue beilagen gemäss genannter Logik. -> "Dein Gericht" plus "Passt das?" und 3 Buttons
+
+mache einen vorschlag für das vorgehen noch ohne code. nutze den beigefügten code als grundlage für die entwicklung!

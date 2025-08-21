@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Menü planen – Mini App</title>
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      /* Fallbacks; Telegram überschreibt per Theme-Variablen */
+      --bg: #ffffff;
+      --text: #111111;
+      --muted: rgba(0,0,0,.6);
+      --card: #ffffff;
+      --shadow: rgba(0,0,0,.06);
+      --border: rgba(0,0,0,.15);
+      --ok: #1a7f37;
+      --err: #b42318;
+    }
+    html, body { margin:0; padding:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { padding: 16px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .card { background: var(--card); border-radius: 16px; padding: 16px; box-shadow: 0 2px 12px var(--shadow); margin-bottom: 16px; border: 1px solid var(--border); }
+    .row { display:flex; gap:12px; align-items:center; margin:8px 0; }
+    .col { flex:1; }
+    label { font-weight:600; display:block; margin-bottom:6px; }
+    input[type=number] { width:100%; padding:10px; border:1px solid var(--border); border-radius:12px; font-size:16px; background: var(--bg); color: var(--text); }
+    .pill { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px; border:1px solid var(--border); border-radius:999px; }
+    .pill input { width:80px; text-align:center; }
+    .hint { color: var(--muted); font-size: 13px; }
+    .ok   { color: var(--ok); }
+    .err  { color: var(--err); }
+    .footer { height: 56px; }
+    .dev { display:none; margin-top:12px; font-size:12px; }
+    .dev textarea { width:100%; height:120px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Menü planen</h1>
+
+    <div class="card">
+      <label>Anzahl Gerichte</label>
+      <div class="row">
+        <div class="col"><input id="count" type="number" min="1" max="12" value="4" inputmode="numeric"/></div>
+      </div>
+      <div class="hint" id="sum-hint">Summe Aufwand: 0 / 4</div>
+    </div>
+
+    <div class="card">
+      <label>Aufwand-Verteilung</label>
+      <div class="row pill">
+        <span>Leicht</span><input id="light" type="number" min="0" max="12" value="2" inputmode="numeric"/>
+      </div>
+      <div class="row pill">
+        <span>Mittel</span><input id="medium" type="number" min="0" max="12" value="1" inputmode="numeric"/>
+      </div>
+      <div class="row pill">
+        <span>Aufwändig</span><input id="heavy" type="number" min="0" max="12" value="1" inputmode="numeric"/>
+      </div>
+      <div class="hint">Die Summe muss der Anzahl Gerichte entsprechen.</div>
+    </div>
+
+    <div class="card">
+      <label>Personen</label>
+      <input id="persons" type="number" min="1" max="12" value="4" inputmode="numeric"/>
+      <div class="hint">Wird für die Einkaufs-/Kochliste genutzt.</div>
+    </div>
+
+    <div class="footer"></div>
+
+    <!-- Kleiner Dev-Bereich nur für Browser-Tests ohne Telegram -->
+    <div class="dev" id="devbox">
+      <p><strong>Hinweis:</strong> Telegram WebApp SDK nicht gefunden. Du testest vermutlich im Browser. Unten siehst du das JSON, das normalerweise an den Bot gesendet würde.</p>
+      <textarea id="devjson" readonly></textarea>
+    </div>
+  </div>
+
+  <script>
+    // Theme aus Telegram übernehmen (falls verfügbar)
+    function applyTgTheme() {
+      try {
+        const tg = window.Telegram?.WebApp;
+        if (!tg) return;
+        const p = tg.themeParams || {};
+        const map = {
+          '--bg': p.bg_color,
+          '--text': p.text_color,
+          '--muted': p.hint_color,
+          '--card': p.secondary_bg_color || p.bg_color,
+          '--border': p.section_separator_color || 'rgba(0,0,0,.15)'
+        };
+        Object.entries(map).forEach(([k,v]) => { if (v) document.documentElement.style.setProperty(k, v); });
+      } catch (_) {}
+    }
+
+    const $ = sel => document.querySelector(sel);
+    const elCount = $('#count'); const elLight = $('#light'); const elMedium = $('#medium'); const elHeavy = $('#heavy');
+    const elPersons = $('#persons'); const elSumHint = $('#sum-hint'); const devbox = $('#devbox'); const devjson = $('#devjson');
+
+    function clampInputs() {
+      const max = Math.max(1, Math.min(12, parseInt(elCount.value || "0")));
+      elCount.value = max;
+      [elLight, elMedium, elHeavy].forEach(el => {
+        const v = parseInt(el.value || "0");
+        el.value = Math.max(0, Math.min(12, v));
+      });
+      const pv = parseInt(elPersons.value || "0");
+      elPersons.value = Math.max(1, Math.min(12, pv));
+    }
+
+    function buildPayload() {
+      return {
+        source: "miniapp-v1",
+        menu_count: parseInt(elCount.value||"0"),
+        aufwand: {
+          light: parseInt(elLight.value||"0"),
+          medium: parseInt(elMedium.value||"0"),
+          heavy: parseInt(elHeavy.value||"0")
+        },
+        persons: parseInt(elPersons.value||"0")
+      };
+    }
+
+    function updateSum(tg) {
+      clampInputs();
+      const c = parseInt(elCount.value||"0");
+      const s = parseInt(elLight.value||"0") + parseInt(elMedium.value||"0") + parseInt(elHeavy.value||"0");
+      elSumHint.textContent = `Summe Aufwand: ${s} / ${c}`;
+      elSumHint.className = "hint " + (s === c ? "ok" : "err");
+      if (tg) {
+        tg.MainButton.setText(s === c ? "Fertig & an Bot senden" : "Summe stimmt nicht");
+        tg.MainButton[s === c ? "enable" : "disable"]();
+      }
+      if (!tg) {
+        // Browser-Test: JSON anzeigen
+        devjson.value = JSON.stringify(buildPayload(), null, 2);
+      }
+    }
+
+    (function init() {
+      applyTgTheme();
+      const tg = window.Telegram?.WebApp;
+
+      [elCount, elLight, elMedium, elHeavy, elPersons].forEach(el => el.addEventListener('input', () => updateSum(tg)));
+      updateSum(tg);
+
+      if (tg && tg.initDataUnsafe) {
+        tg.expand();
+        tg.MainButton.setText("Fertig & an Bot senden");
+        tg.MainButton.show();
+        tg.onEvent('mainButtonClicked', () => {
+          const payload = buildPayload();
+          try {
+            tg.sendData(JSON.stringify(payload));
+            tg.close();
+          } catch (e) {
+            alert("Fehler beim Senden: " + e.message);
+          }
+        });
+      } else {
+        // Dev-Hinweis im normalen Browser
+        devbox.style.display = 'block';
+      }
+    })();
+  </script>
+</body>
+</html>

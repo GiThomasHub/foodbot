@@ -1,0 +1,32 @@
+falsch. es soll wie folgt ablaufen:
+
+ich habe im Profil definiert: stil, Einschränkung, art. dies ist gegeben und diese Einschränkungen dürfen nicht aufgelöst werden. weder im tauschen noch sonst wo.
+
+wichtig:
+wenn ich im stil bspw klassisch & mediteran ausgewählt habe, darf im aktuellen gerichte-lauf kein gericht vorkommen, welches nicht einem der beiden stile angehört ist. die stil vorgaben sind somit klar bindend einzuhalten.
+wenn ich bei Einschränkung bspw. vegi gewählt habe, darf in diesem gerichte-lauf kein gericht vorkommen, welches nicht der einshränkung vegi. die Einschränkung vorgaben sind somit klar binden einzuhalten
+wenn ich art Verteilung vorgebe, muss dies ebenfalls eingehalten werden. der bereist programmierte fallback gilt weiterhin!
+
+die bindenden vorgaben gelten ab dem zeitpunkt wo ich wähle "Neues Profil" oder "bestehendes Profil" bis zum Neustart und somit bis die gerichtewahl zurückgesetzt wird. wenn der user "keine einschränkungen" wählt, gelten die vorgaben natürlich nicht. in neudurchlauf sind die bindenden vorgaben erst wieder einzuhalten, wenn ein bestehendes Profil gewählt wird oder ein neues Profil erstellt wird. wenn ich ohne Profil Einschränkungen weiterfahre, gelten alle vorgaben nicht mehr!
+
+
+somit wird, sobald im loop das Profil festgestellt wird (bestehendes Profil, neues Profil, keine Einschränkungen) das set aller zur verfügung stehender gerichte entsprechend eingeschränkt oder nicht (falls "Keine Einschränkungen"). Im Beispiel sind somit nur gerichte die vegi sind und klassisch oder mediteran für die gerichtewahl möglich. im gleichen durchlauf darf der bot somit keine anderen gerichte mehr anzeigen bis der Neustart kommt und man wieder von vorne beginnt und eventuell die vorgaben ändert oder ohne einschränkungen weiterfährt.
+
+
+nun zum aufwand:
+
+klar ist, dass die vorgeschlagenen gerichte dem definierten aufwandslevel entsprechend müssen. sprich wenn ich 4x1, 2x2, 1x3 wähle für total 7 gerichte, dann muss das so eingehalten werden. wenn ich nun 2 gerichte vom aufwand 1 tausche und 1 gericht vom aufwand 3, darf das neue gericht ausschliesslich aus denselben aufwandstöpfen gewählt werden. gleichzeitig, darf aus dem gleichen aufwandstopf kein gericht nochmals angezeigt werden, bis nicht alle aus demselben aufwandstopf durch sind. wichtig: die oben genannten vorgaben müssen weiter zwingend eingehalten werden. sprich wenn alle gerichte mit stil klassisch oder mediteran und Einschränkung vegi der aufwandsstuufe 1 durch sind, dann dürfen nicht gerichte mit stil asiatisch der aufwandsstufe 1 kommen. jetzt werden wieder alle gerichte klassisch/mediteran/vegi bei aufwandsstufe 1 freigegeben, sprich es können wieder dieselben gerichte vorkommen. wobei auch in diesem durchlauf gilt: keine Wiederholung bis nicht alle durch sind. dasselbe gilt selbstverständlich für alle aufwandsstufen (1,2,3) etc.
+
+im code ist ein fallback definiert, falls nicht genügend gerichte eines aufwandlevels vorhanden sind. bspw. jemand will 5 gerichte der stufe 3, es hat aber nur 3. dieser fallback muss weiter eingehalten werden!
+
+allgemein: mit gerichte-lauf meine ich den ganzen Prozess vom start wo ich "Menü" klicke, bis zum "Neustart".
+
+nun zum vorgehen:
+
+1) erkläre kurz wie der fallback bei "Art" und "Aufwand" definiert ist und wie dieser funktioniert.
+
+2) lese obiges ganz genau durch und fasse es in deinen eigenen worten schön strukturiert zusammen, wie der ablauf entsprechend sein soll. noch ohne code.
+
+3) prüfe weiter im code, wie der aktuelle ablauf ist und stelle die wesentlichen unterschied gegenüber. ohne code.
+
+alles einfach halten! ich bin kein programmierprofi. wir gehen jetzt schritt für schritt vor! falls unklarheiten sind, stelle die fragen zuerst, vor der beantwortung. alle antworten solltest du aber bereits im code (beigefügt) finden!

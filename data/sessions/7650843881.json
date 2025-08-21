@@ -1,0 +1,14 @@
+{
+  "menues": [
+    "Burger",
+    "Z\u00fcrigschnetzlets",
+    "Stroganoff"
+  ],
+  "personen": 2,
+  "favoriten": [],
+  "aufwand": [
+    1,
+    2,
+    3
+  ]
+}

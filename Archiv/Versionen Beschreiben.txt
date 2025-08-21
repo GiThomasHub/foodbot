@@ -1,0 +1,9 @@
+Versionen Beschreiben
+
+*menu_bot_6_beilagen:
+- zusätzliches Beilagen-Sheet eingefügt
+- Einkaufsliste/Kochliste auf 2 Dezimalstellen
+
+*menu_bot_7_beilagen:
+~ mehrere menüs aufs mal tauschen
+~ menü die ausgetauscht wurden, kommen nicht mehr vor. wenn es keine alternativen mehr gibt (sprich alle durch sind), ist wieder offen und alle können vorkommen
