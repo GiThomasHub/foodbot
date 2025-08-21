@@ -63,8 +63,8 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # === ENV & Sheets Setup ===
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_API_KEY")
-WEBHOOK_BASE_URL = os.environ["WEBHOOK_BASE_URL"].rstrip("/")  # z.B. https://foodbot-xxxx.a.run.app
-WH_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
+WEBHOOK_BASE_URL = (os.getenv("WEBHOOK_BASE_URL") or "").rstrip("/")
+WH_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]  # keep required in prod
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # darf None sein
 SHEET_ID = os.getenv("SHEET_ID", "1XzhGPWz7EFJAyZzaJQhoLyl-cTFNEa0yKvst0D0yVUs")
@@ -3960,22 +3960,28 @@ def main():
 
     # === Webhook bei Telegram setzen (mit Secret-Header) ===
     async def _post_init(application):
-        await application.bot.set_webhook(
-            url=f"{WEBHOOK_BASE_URL}/webhook",
-            secret_token=WH_SECRET,
-            allowed_updates=["message","callback_query","chat_member"]
-        )
+        if WEBHOOK_BASE_URL:
+            await application.bot.set_webhook(
+                url=f"{WEBHOOK_BASE_URL}/webhook",
+                secret_token=WH_SECRET,
+                allowed_updates=["message", "callback_query", "chat_member"],
+            )
+        else:
+            print("WEBHOOK_BASE_URL not set yet; skipping set_webhook (service still listens).")
+
+
     app.post_init = _post_init
 
     # === Webserver für Cloud Run starten ===
-    port = int(os.getenv("PORT", "8080"))  # Cloud Run setzt PORT
+    port = int(os.getenv("PORT", "8080"))
     print(f"✅ Webhook-Server startet auf Port {port} …")
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path="https://foodbot-1055976146993.europe-west6.run.app"
-        # (PTB prüft den Secret-Header ggfs. automatisch; set_webhook nutzt secret_token)
+        url_path="webhook",
+        secret_token=WH_SECRET,  # PTB validates X-Telegram-Bot-Api-Secret-Token
     )
+
 
 if __name__ == "__main__":
     main()
