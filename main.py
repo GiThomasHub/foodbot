@@ -9,8 +9,6 @@ import requests
 import logging
 import httpx
 import math
-import http.server
-import socketserver
 import asyncio
 from html import escape, unescape
 from datetime import datetime
@@ -19,7 +17,7 @@ from collections import Counter
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 from dotenv import load_dotenv
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials as SACredentials ######NEU
 from openai import OpenAI
 from typing import Set
 from decimal import Decimal, ROUND_HALF_UP
@@ -55,12 +53,6 @@ logging.getLogger("fontTools").setLevel(logging.ERROR)
 logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
 
 
-PORT = int(os.environ.get("PORT", 8080))
-Handler = http.server.SimpleHTTPRequestHandler
-
-with socketserver.TCPServer(('', PORT), Handler) as httpd:
-    print("serving at port", PORT)
-    httpd.serve_forever()
 
 MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SHOW_LIST, FERTIG_PERSONEN, REZEPT_INDEX, REZEPT_PERSONEN, TAUSCHE_SELECT, TAUSCHE_CONFIRM, ASK_CONFIRM, EXPORT_OPTIONS, FAV_OVERVIEW, FAV_DELETE_SELECT, PDF_EXPORT_CHOICE, FAV_ADD_SELECT, RESTART_CONFIRM, PROFILE_CHOICE, PROFILE_NEW_A, PROFILE_NEW_B, PROFILE_NEW_C, PROFILE_OVERVIEW, QUICKONE_START, QUICKONE_CONFIRM, PERSONS_SELECTION, PERSONS_MANUAL, MENU_COUNT, MENU_AUFWAND = range(29)
 
@@ -71,6 +63,8 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # === ENV & Sheets Setup ===
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_API_KEY")
+WEBHOOK_BASE_URL = os.environ["WEBHOOK_BASE_URL"].rstrip("/")  # z.B. https://foodbot-xxxx.a.run.app
+WH_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # darf None sein
 SHEET_ID = os.getenv("SHEET_ID", "1XzhGPWz7EFJAyZzaJQhoLyl-cTFNEa0yKvst0D0yVUs")
@@ -82,13 +76,13 @@ SHEET_ZUTATEN = os.getenv("SHEET_ZUTATEN", "Zutaten")
 openai_client = OpenAI(api_key=OPENAI_KEY)
 
 scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 ]
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    os.getenv("GOOGLE_CRED_JSON", "credentials.json"), scope
-)
+creds_info = json.loads(os.environ["GOOGLE_CRED_JSON"])  # Secret Manager → Env Var
+creds = SACredentials.from_service_account_info(creds_info, scopes=scope)
 client = gspread.authorize(creds)
+
 
 # === Persistence Files ===
 SESSIONS_FILE = "sessions.json"
@@ -3804,7 +3798,9 @@ Anleitung (kurz Schritt-für-Schritt):"""
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()
+
+    # === Handler-Registrierung (DEIN bestehender Code bleibt unverändert) ===
     cancel_handler = CommandHandler("cancel", cancel)
     reset_handler  = CommandHandler("reset", reset_command)
     app.add_handler(CommandHandler("start", start))
@@ -3813,7 +3809,6 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("favorit", favorit))
-    #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
     app.add_handler(CommandHandler("delete", delete))
 
 
@@ -3963,9 +3958,24 @@ def main():
 
 
 
-    print("✅ Bot läuft...")
-    app.run_polling()
+    # === Webhook bei Telegram setzen (mit Secret-Header) ===
+    async def _post_init(application):
+        await application.bot.set_webhook(
+            url=f"{WEBHOOK_BASE_URL}/webhook",
+            secret_token=WH_SECRET,
+            allowed_updates=["message","callback_query","chat_member"]
+        )
+    app.post_init = _post_init
 
+    # === Webserver für Cloud Run starten ===
+    port = int(os.getenv("PORT", "8080"))  # Cloud Run setzt PORT
+    print(f"✅ Webhook-Server startet auf Port {port} …")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path="webhook"
+        # (PTB prüft den Secret-Header ggfs. automatisch; set_webhook nutzt secret_token)
+    )
 
 if __name__ == "__main__":
     main()
