@@ -3973,7 +3973,7 @@ def main():
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path="webhook"
+        url_path="https://foodbot-1055976146993.europe-west6.run.app"
         # (PTB prüft den Secret-Header ggfs. automatisch; set_webhook nutzt secret_token)
     )
 
