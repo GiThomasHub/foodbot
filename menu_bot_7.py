@@ -2279,7 +2279,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debug_msg = (
             f"\n📊 Aufwand-Verteilung: {aufwand_text}"
             f"\n🎨 Küche-Verteilung:    {kitchen_text}"
-            f"\n⚙️ Typ-Verteilung:      {art_text}"
+            f"\n⚙️ Typ-Verteilung:      {typ_text}"
             f"\n🥗 Ernährungsstil:       {einschr_text}"
         )
         await update.message.reply_text(debug_msg)
