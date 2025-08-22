@@ -64,7 +64,7 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_API_KEY")
 WEBHOOK_BASE_URL = (os.getenv("WEBHOOK_BASE_URL") or "").rstrip("/")
-WH_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]  # keep required in prod
+WH_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "dev-secret")  # fallback avoids startup crash
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # darf None sein
 SHEET_ID = os.getenv("SHEET_ID", "1XzhGPWz7EFJAyZzaJQhoLyl-cTFNEa0yKvst0D0yVUs")
@@ -79,9 +79,12 @@ scope = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
-creds_info = json.loads(os.environ["GOOGLE_CRED_JSON"])  # Secret Manager → Env Var
-creds = SACredentials.from_service_account_info(creds_info, scopes=scope)
+gc_json = os.getenv("GOOGLE_CRED_JSON")  # Secret value (full JSON), not a file path
+if not gc_json:
+    raise RuntimeError("GOOGLE_CRED_JSON env var is missing")
+creds = SACredentials.from_service_account_info(json.loads(gc_json), scopes=scope)
 client = gspread.authorize(creds)
+
 
 
 # === Persistence Files ===
