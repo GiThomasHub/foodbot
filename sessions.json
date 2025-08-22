@@ -1,16 +1,13 @@
 {
   "7650843881": {
     "menues": [
-      "Polenta mit Auberginen-Hackfleisch-Ragout",
-      "Nasi Goreng",
-      "Sommer-Lasagne",
-      "Stroganoff"
+      "Japanische Soufflé Pancakes"
     ],
     "aufwand": [
-      1,
-      1,
-      2,
-      3
-    ]
+      0
+    ],
+    "beilagen": {
+      "Japanische Soufflé Pancakes": []
+    }
   }
 }

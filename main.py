@@ -75,15 +75,23 @@ SHEET_ZUTATEN = os.getenv("SHEET_ZUTATEN", "Zutaten")
 # Instantiate OpenAI client (new SDK)
 openai_client = OpenAI(api_key=OPENAI_KEY)
 
+# ---- Lazy gspread client (erst wenn wirklich benötigt) ----
 scope = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
-gc_json = os.getenv("GOOGLE_CRED_JSON")  # Secret value (full JSON), not a file path
-if not gc_json:
-    raise RuntimeError("GOOGLE_CRED_JSON env var is missing")
-creds = SACredentials.from_service_account_info(json.loads(gc_json), scopes=scope)
-client = gspread.authorize(creds)
+_GS_CLIENT = None
+
+def get_gs_client():
+    global _GS_CLIENT
+    if _GS_CLIENT is None:
+        gc_json = os.getenv("GOOGLE_CRED_JSON")  # komplettes JSON als String
+        if not gc_json:
+            raise RuntimeError("GOOGLE_CRED_JSON env var is missing")
+        creds = SACredentials.from_service_account_info(json.loads(gc_json), scopes=scope)
+        _GS_CLIENT = gspread.authorize(creds)
+    return _GS_CLIENT
+
 
 
 
@@ -498,6 +506,7 @@ def ensure_data_loaded():
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def lade_gerichtebasis():
+    client = get_gs_client()
     sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_GERICHTE)
     rows  = sheet.get_all_values()  # Header = rows[0]
     # A–J: Nummer | Code | Aktiv | Gericht | Aufwand | Typ | Ernährungsstil | Küche | Beilagen | Link
@@ -522,6 +531,7 @@ def lade_gerichtebasis():
 
 
 def lade_beilagen():
+    client = get_gs_client()
     sheet = client.open_by_key(SHEET_ID).worksheet("Beilagen")
     raw = sheet.get_all_values()[1:]       # überspringe Header
     data = [row[:5] for row in raw]        # nur erste 5 Spalten
@@ -538,6 +548,7 @@ def parse_codes(s: str):
 
 
 def lade_zutaten():
+    client = get_gs_client()
     sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_ZUTATEN)
     raw = sheet.get_all_values()[1:]  # Header überspringen
     # Nur die ersten 6 Spalten („Gericht“, „Zutat“, „Kategorie“, „Typ“, „Menge“, „Einheit“)
@@ -2311,7 +2322,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
         debug_msg = (
             f"\n📊 Aufwand-Verteilung: {aufwand_text}"
             f"\n🎨 Küche-Verteilung:    {kitchen_text}"
-            f"\n⚙️ Typ-Verteilung:      {art_text}"
+            f"\n⚙️ Typ-Verteilung:      {typ_text}"
             f"\n🥗 Ernährungsstil:       {einschr_text}"
         )
         await update.message.reply_text(debug_msg)
@@ -3992,16 +4003,6 @@ def main():
 
 
     # === Webhook bei Telegram setzen (mit Secret-Header) ===
-    async def _post_init(application):
-        if WEBHOOK_BASE_URL:
-            await application.bot.set_webhook(
-                url=f"{WEBHOOK_BASE_URL}/webhook",
-                secret_token=WH_SECRET,
-                allowed_updates=["message", "callback_query", "chat_member"],
-            )
-        else:
-            print("WEBHOOK_BASE_URL not set yet; skipping set_webhook (service still listens).")
-
     async def _post_init(application):
         if not WEBHOOK_BASE_URL:
             logging.warning(

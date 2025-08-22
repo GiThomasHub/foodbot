@@ -11,7 +11,6 @@
 
 ## Küche: "Anderes" einführen?
 
-## Kategorien umbenennen: Gemüse -> Gemüse/Früchte | Saucen/Konserven -> ??
 
 ## mini app -> wo macht es sinn, wo nicht... Profil / Beilagenselektion / Favoritenhandling / Tauschen -> "Beilagenselektion+"
 	(github URL besteht bereits und in .env file inkludiert)
@@ -21,9 +20,15 @@
 
 ## umrechner EL in gramm etc
 
+## profilbild für bot
 
 
+## Ggf. Aufwand anpassen auf 0-30, 30-45, 45+
 
+## bei anzahl gerichten auswählen -> nicht direkt weiter, sondern mit "Fertig" bestätigen. falls man falschen knopf gedrückt hat...
+
+RUNTIME_SA_EMAIL
+foodbot-runtime-sa@foodapp-463218.iam.gserviceaccount.com
 
 
 ## Fehlerhandling: bot fällt aus, wenn ich rückwirkend noch einen button klicke (bspw. eine frage weiter). bot darf aber nicht ausfallen, es soll einfach nichts passieren. ausser wenn ich einen button von /start klicke
@@ -101,8 +106,9 @@ Erledigt:
 - (20250815): buttons bei beilagenselektion besser anordnen. fertig zuunterst und darüber jeweils 3 buttons nebeneinander oder so
 - (20250815): Super, bis bald!👋      -> sobald die neue übersicht kommt, kann das wieder verschwinden
 - (20250818): PDF Export: Kochliste vor Einkaufsliste. zwei spalten export bei einkaufsliste und mit überschrift arbeiten (gemüse, fleisch, etc) / Seitenumbruch
-- (20250818): 
-
+- (20250820): Kategorien umbenennen: Gemüse -> Obst & Gemüse | Saucen/Konserven -> Trockenware & Vorrat | Brot/Teig -> Backwaren | Tiefkühlprodukte -> Kühlregal | Haushalt/Sonstiges | Fleisch -> Fleisch & Fisch | Vegi -> Kühlregal | Teigwaren -> Trockenware & Vorrat
+- (20250820): kategorie in einkaufsliste unterstreichen
+- (20250820): 
 
 
 ======================================================================
