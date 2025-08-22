@@ -468,6 +468,29 @@ recipe_cache = load_json(CACHE_FILE)
 profiles = load_profiles()
 
 
+# ---- Lazy data loading to avoid blocking Cloud Run startup ----
+df_gerichte = None
+df_beilagen = None
+df_zutaten  = None
+
+def ensure_data_loaded():
+    """Loads Sheets once, on demand."""
+    global df_gerichte, df_beilagen, df_zutaten
+    if df_gerichte is None or df_beilagen is None or df_zutaten is None:
+        try:
+            g = lade_gerichtebasis()
+            b = lade_beilagen()
+            z = lade_zutaten()
+            df_gerichte, df_beilagen, df_zutaten = g, b, z
+            logging.info("✅ Google Sheets loaded (Gerichte=%d, Beilagen=%d, Zutaten=%d)",
+                         len(df_gerichte), len(df_beilagen), len(df_zutaten))
+        except Exception as e:
+            logging.exception("❌ Failed to load Google Sheets: %s", e)
+            # keep raising so handlers see a clear error if something’s misconfigured
+            raise
+
+
+
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # === Google Sheets Data ===
@@ -530,9 +553,6 @@ def lade_zutaten():
     df["Menge"] = pd.to_numeric(df["Menge"], errors="coerce").fillna(0)
     return df
 
-df_gerichte = lade_gerichtebasis()
-df_beilagen = lade_beilagen()
-df_zutaten  = lade_zutaten()
 
 
 # -------------------------------------------------
@@ -739,6 +759,7 @@ async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     """/menu per Text – startet Profil-Loop"""
     # frische Liste für alle Wizard-Nachrichten
     context.user_data["prof_msgs"] = []
@@ -752,6 +773,7 @@ async def menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PROFILE_CHOICE
 
 async def menu_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     """/menu über den 🍲-Button im Hauptmenü"""
     q = update.callback_query
     await q.answer()
@@ -1059,6 +1081,7 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_menu_count_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     """Startet den neuen Menü-Auswahl-Flow mit Buttons."""
     await cleanup_prof_loop(context, update.effective_chat.id)
 
@@ -1066,6 +1089,7 @@ async def start_menu_count_flow(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     """
     Erwartet Eingabe:  <gesamt> (<einfach>,<mittel>,<aufwändig>)
     Beispiel: 4 (2,1,1)
@@ -1546,6 +1570,7 @@ async def persons_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─────────── quickone_start ───────────
 async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
 
@@ -1827,6 +1852,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return BEILAGEN_SELECT
    
 async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     """
     Zeigt für ein einzelnes ausgewähltes Menü die Inline-Buttons
     aller erlaubten Beilagen an (max.2 KH + 2 Gemüse).
@@ -2027,6 +2053,7 @@ async def ask_final_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     user_id = str(update.message.from_user.id)
     basis = df_gerichte
     reply = f"✅ Google Sheet OK, {len(basis)} Menüs verfügbar.\n"
@@ -2162,6 +2189,7 @@ def build_profile_overview_keyboard() -> InlineKeyboardMarkup:
 ##############################################
 
 async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     user_id = str(update.message.from_user.id)
     if user_id not in sessions:
         return await update.message.reply_text("⚠️ Nutze erst /menu.")
@@ -2294,6 +2322,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def tausche_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     """
     Entry-Point für '/tausche' ohne Argumente:
     Zeigt ein Inline-Keyboard mit den Menü-Indizes 1…N zum Mehrfach-Tausch.
@@ -2651,6 +2680,7 @@ async def fertig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return FERTIG_PERSONEN
 
 async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_data_loaded()
     # Personenzahl: zuerst aus context.user_data (Buttons), sonst aus Text
     user_id = str(update.effective_user.id)
     if "temp_persons" in context.user_data:
@@ -3972,6 +4002,18 @@ def main():
         else:
             print("WEBHOOK_BASE_URL not set yet; skipping set_webhook (service still listens).")
 
+    async def _post_init(application):
+        if not WEBHOOK_BASE_URL:
+            logging.warning(
+                "WEBHOOK_BASE_URL missing; skipping set_webhook. "
+                "Server listens, but Telegram won't deliver updates yet."
+            )
+            return
+        await application.bot.set_webhook(
+            url=f"{WEBHOOK_BASE_URL}/webhook",
+            secret_token=WH_SECRET,
+            allowed_updates=["message","callback_query","chat_member"],
+        )
 
     app.post_init = _post_init
 
