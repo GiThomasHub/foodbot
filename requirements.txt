@@ -1,4 +1,4 @@
-python-telegram-bot>=21.8,<22.0
+python-telegram-bot[webhooks]>=21.8,<22.0
 httpx>=0.24
 pandas>=2.0
 gspread>=6.0
