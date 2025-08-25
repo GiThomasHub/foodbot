@@ -3966,22 +3966,24 @@ def main():
 
 
 
-    print("✅ Bot läuft...")
-port = int(os.getenv("PORT","8080"))
-if BASE_URL:
-    url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
-    webhook_url = f"{BASE_URL.rstrip('/')}/{url_path}"
-    print(f"▶️ Webhook auf :{port} → {webhook_url}")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=url_path,
-        webhook_url=webhook_url,
-        secret_token=WEBHOOK_SECRET,
-    )
-else:
-    print("⚠️ PUBLIC_URL nicht gesetzt → starte per Polling (nur lokal geeignet).")
-    app.run_polling()
+    # (Cloud Run start moved into main())
 
+
+    print("✅ Bot läuft...")
+    port = int(os.getenv("PORT","8080"))
+    if BASE_URL:
+        url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
+        webhook_url = f"{BASE_URL.rstrip('/')}/{url_path}"
+        print(f"▶️ Webhook auf :{port} → {webhook_url}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            webhook_url=webhook_url,
+            secret_token=WEBHOOK_SECRET
+        )
+    else:
+        print("⚠️ PUBLIC_URL nicht gesetzt → starte lokal per Polling (nur lokal geeignet).")
+        app.run_polling()
 if __name__ == "__main__":
     main()
