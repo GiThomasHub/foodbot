@@ -1,23 +1,23 @@
-substitutions:
-  _REGION: europe-west6
-  _AR_REPO: foodbot
-  _SERVICE: foodbot
-  _IMAGE: europe-west6-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE}:$COMMIT_SHA
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build','-t','${_IMAGE}','.']
+    args:
+      - build
+      - -t
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - .
 
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push','${_IMAGE}']
-
+    args:
+      - push
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - run
       - deploy
-      - ${_SERVICE}
-      - --image=${_IMAGE}
-      - --region=${_REGION}
+      - foodbot
+      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - --region=europe-west6
       - --allow-unauthenticated
       - --port=8080
       - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
@@ -25,9 +25,11 @@ steps:
       - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
       - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
       - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-images:
-  - ${_IMAGE}
+      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
+      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
 
-# Wichtig: logging gehört unter "options"
+images:
+  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
 options:
   logging: CLOUD_LOGGING_ONLY
