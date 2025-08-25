@@ -65,7 +65,8 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # === ENV & Sheets Setup ===
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_API_KEY")
-BASE_URL = os.getenv("PUBLIC_URL","")
+BASE_URL = (os.getenv("PUBLIC_URL") or os.getenv("BASE_URL") or "").strip()
+print(f"ENV CHECK → PORT={os.getenv('PORT','8080')} BASE_URL={'gesetzt' if BASE_URL else 'leer'}")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # darf None sein
