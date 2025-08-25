@@ -64,6 +64,8 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # === ENV & Sheets Setup ===
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_API_KEY")
+BASE_URL = os.getenv("PUBLIC_URL","")
+WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # darf None sein
 SHEET_ID = os.getenv("SHEET_ID", "1XzhGPWz7EFJAyZzaJQhoLyl-cTFNEa0yKvst0D0yVUs")
@@ -78,18 +80,22 @@ scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive",
 ]
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    os.getenv("GOOGLE_CRED_JSON", "credentials.json"), scope
-)
+gc = os.getenv("GOOGLE_CRED_JSON")
+if gc and gc.strip().startswith("{"):
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(gc), scope)
+else:
+    creds = ServiceAccountCredentials.from_json_keyfile_name(gc or "credentials.json", scope)
 client = gspread.authorize(creds)
 
 # === Persistence Files ===
-SESSIONS_FILE = "sessions.json"
-FAVORITES_FILE = "favorites.json"
-CACHE_FILE = "recipe_cache.json"
-PROFILES_FILE = "profiles.json"
-FAV_FILE = "favorites.json"
-HISTORY_FILE = "history.json"
+DATA_DIR = os.getenv("DATA_DIR","/tmp")
+os.makedirs(DATA_DIR, exist_ok=True)
+SESSIONS_FILE = os.path.join(DATA_DIR, "sessions.json")
+FAVORITES_FILE = os.path.join(DATA_DIR, "favorites.json")
+CACHE_FILE = os.path.join(DATA_DIR, "recipe_cache.json")
+PROFILES_FILE = os.path.join(DATA_DIR, "profiles.json")
+FAV_FILE = FAVORITES_FILE
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 
 
 # === Profil-Optionen ===
@@ -2990,9 +2996,13 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
     # PDF initialisieren (mit Kopf-/Fußzeile und 2 cm Rändern)
     date_str = datetime.now().strftime("%d.%m.%Y")
     pdf = PDF(date_str)  # <<--- WICHTIG: unsere Unterklasse benutzen
-    pdf.add_font("DejaVu",   "",  "fonts/DejaVuSans.ttf")
-    pdf.add_font("DejaVu",   "B", "fonts/DejaVuSans-Bold.ttf")
-    pdf.add_page()
+    # Fonts optional – mit Fallback auf Core-Fonts
+    try:
+        pdf.add_font("DejaVu", "",  "fonts/DejaVuSans.ttf")
+        pdf.add_font("DejaVu", "B", "fonts/DejaVuSans-Bold.ttf")
+        pdf.add_page()
+    except Exception:
+        pdf.add_page()  # Core-Fonts (Helvetica) werden bereits verwendet
 
 
     # ---------- Helper: KOCHLISTE (zweizeilig: Titel-Zeile, Zutaten-Zeile) ----------
@@ -3957,8 +3967,21 @@ def main():
 
 
     print("✅ Bot läuft...")
+port = int(os.getenv("PORT","8080"))
+if BASE_URL:
+    url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
+    webhook_url = f"{BASE_URL.rstrip('/')}/{url_path}"
+    print(f"▶️ Webhook auf :{port} → {webhook_url}")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=url_path,
+        webhook_url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+    )
+else:
+    print("⚠️ PUBLIC_URL nicht gesetzt → starte per Polling (nur lokal geeignet).")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
