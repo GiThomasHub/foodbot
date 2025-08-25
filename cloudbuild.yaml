@@ -31,3 +31,5 @@ steps:
 
 images:
   - ${_IMAGE}
+
+logging: CLOUD_LOGGING_ONLY
