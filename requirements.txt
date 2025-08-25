@@ -1,14 +1,9 @@
-python-telegram-bot==20.3
-aiohttp==3.*
-
-pandas==2.2.2
-gspread==6.*
-google-auth==2.*
-httpx==0.27.*
-
-fpdf2>=2.6.1
-python-dotenv==1.0.1
-
-openai==1.*
-# If/when you actually use Firestore in code:
-# google-cloud-firestore==2.*
+python-telegram-bot>=21.8,<22.0
+httpx>=0.24
+pandas>=2.0
+gspread>=6.0
+google-auth>=2.29
+google-cloud-firestore>=2.16
+openai>=1.0
+fpdf2>=2.7
+python-dotenv>=1.0
