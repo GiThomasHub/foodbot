@@ -13,6 +13,7 @@ import asyncio
 from html import escape, unescape
 from datetime import datetime
 from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from collections import Counter
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
@@ -3799,6 +3800,16 @@ Anleitung (kurz Schritt-für-Schritt):"""
         await update.message.reply_text(f"❌ Fehler: {e}")
         return REZEPT_PERSONEN
 
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    # silence default stderr logging
+    def log_message(self, format, *args):
+        return
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -3970,7 +3981,8 @@ def main():
 
 
     print("✅ Bot läuft...")
-    port = int(os.getenv("PORT","8080"))
+    port = int(os.getenv("PORT", "8080"))
+
     if BASE_URL:
         url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
         webhook_url = f"{BASE_URL.rstrip('/')}/{url_path}"
@@ -3980,10 +3992,16 @@ def main():
             port=port,
             url_path=url_path,
             webhook_url=webhook_url,
-            secret_token=WEBHOOK_SECRET
+            secret_token=WEBHOOK_SECRET,
         )
     else:
-        print("⚠️ PUBLIC_URL nicht gesetzt → starte lokal per Polling (nur lokal geeignet).")
-        app.run_polling()
+        # In Cloud Run (K_SERVICE is set) we must still open the port,
+        # otherwise the revision won't become ready.
+        if os.getenv("K_SERVICE"):
+            print(f"⚠️ PUBLIC_URL nicht gesetzt (Cloud Run). Starte Health-Server auf :{port}.")
+            HTTPServer(("0.0.0.0", port), _HealthHandler).serve_forever()
+        else:
+            print("⚠️ PUBLIC_URL nicht gesetzt → starte lokal per Polling (nur lokal geeignet).")
+            app.run_polling()
 if __name__ == "__main__":
     main()
