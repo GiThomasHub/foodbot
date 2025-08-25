@@ -10,6 +10,24 @@ steps:
     args:
       - push
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
+  # nach dem Push-Step einfügen
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'verify-deps-inside-image'
+    args:
+      - run
+      - --rm
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - python
+      - -c
+      - |
+        import importlib.metadata as md
+        import telegram, telegram.ext, tornado
+        print("PTB =", md.version('python-telegram-bot'))
+        print("tornado =", md.version('tornado'))
+        print("IMAGE DEPS OK")
+
+      
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
