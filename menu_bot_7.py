@@ -6,6 +6,7 @@ import pandas as pd
 import gspread
 import warnings
 import requests
+import urllib.request
 import logging
 import httpx
 import math
@@ -65,7 +66,7 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # === ENV & Sheets Setup ===
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_API_KEY")
-BASE_URL = (os.getenv("PUBLIC_URL") or os.getenv("BASE_URL") or "").strip()
+BASE_URL = _compute_base_url()
 print(f"ENV CHECK → PORT={os.getenv('PORT','8080')} BASE_URL={'gesetzt' if BASE_URL else 'leer'}")
 WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
@@ -216,7 +217,33 @@ sessions  = load_json(SESSIONS_FILE)
 history   = load_json(HISTORY_FILE)
 recipe_cache = {}
 
+def _compute_base_url():
+    # 1) Falls gesetzt, einfach nehmen
+    env_url = (os.getenv("PUBLIC_URL") or os.getenv("BASE_URL") or "").strip()
+    if env_url:
+        return env_url
 
+    # 2) In Cloud Run: kanonische URL selbst bauen
+    if os.getenv("K_SERVICE"):
+        try:
+            def _meta(path):
+                req = urllib.request.Request(
+                    f'http://metadata.google.internal/computeMetadata/v1/{path}',
+                    headers={"Metadata-Flavor": "Google"}
+                )
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    return r.read().decode()
+
+            service = os.getenv("K_SERVICE")
+            project_num = _meta("project/numeric-project-id")
+            region = _meta("instance/region").split("/")[-1]  # .../regions/<region>
+            return f"https://{service}-{project_num}.{region}.run.app"
+        except Exception as e:
+            print(f"⚠️ Konnte kanonische URL nicht ermitteln: {e}")
+
+    # 3) Fallback: leer -> Health-Server
+    return ""
+    
 
 def build_swap_keyboard(menus: list[str], selected: set[int]) -> InlineKeyboardMarkup:
     """Buttons 1…N mit Toggle-Häkchen + ‘Fertig’."""
