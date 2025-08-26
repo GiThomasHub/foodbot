@@ -4010,11 +4010,22 @@ def main():
 
     print("✅ Bot läuft...")
     port = int(os.getenv("PORT", "8080"))
+    url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
 
-    if BASE_URL:
-        url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
+    if os.getenv("K_SERVICE"):
+        # Cloud Run: starte IMMER den PTB-Webhook-Server ohne webhook_url
+        # (Telegram-Webhook setzt du ja extern per setWebhook)
+        print(f"▶️ Cloud Run Webhook auf :{port} path=/{url_path} (ohne webhook_url)")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=url_path,
+            secret_token=WEBHOOK_SECRET,
+        )
+    elif BASE_URL:
+        # Lokal mit PUBLIC_URL (z.B. ngrok)
         webhook_url = f"{BASE_URL.rstrip('/')}/{url_path}"
-        print(f"▶️ Webhook auf :{port} → {webhook_url}")
+        print(f"▶️ Lokaler Webhook auf :{port} → {webhook_url}")
         app.run_webhook(
             listen="0.0.0.0",
             port=port,
@@ -4023,13 +4034,7 @@ def main():
             secret_token=WEBHOOK_SECRET,
         )
     else:
-        # In Cloud Run (K_SERVICE is set) we must still open the port,
-        # otherwise the revision won't become ready.
-        if os.getenv("K_SERVICE"):
-            print(f"⚠️ PUBLIC_URL nicht gesetzt (Cloud Run). Starte Health-Server auf :{port}.")
-            HTTPServer(("0.0.0.0", port), _HealthHandler).serve_forever()
-        else:
-            print("⚠️ PUBLIC_URL nicht gesetzt → starte lokal per Polling (nur lokal geeignet).")
-            app.run_polling()
+        print("⚠️ Keine PUBLIC_URL → starte Polling (nur lokal geeignet).")
+        app.run_polling()
 if __name__ == "__main__":
     main()
