@@ -3835,9 +3835,17 @@ class _HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
-    # silence default stderr logging
+    def do_POST(self):
+        # Verhindert 501 vom Health-Server, solange der PTB-Webhook nicht läuft
+        if self.path.startswith("/webhook/"):
+            self.send_response(204)   # No Content
+        else:
+            self.send_response(404)
+        self.end_headers()
+
     def log_message(self, format, *args):
         return
+
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
