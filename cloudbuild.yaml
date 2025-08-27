@@ -1,19 +1,21 @@
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
+  # 1) Build
+  - name: gcr.io/cloud-builders/docker
     args:
       - build
       - -t
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
       - .
 
-  - name: 'gcr.io/cloud-builders/docker'
+  # 2) Push
+  - name: gcr.io/cloud-builders/docker
     args:
       - push
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
 
-  # nach dem Push-Step einfügen
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'verify-deps-inside-image'
+  # 3) Mini-Check: PTB/Tornado im Image vorhanden?
+  - name: gcr.io/cloud-builders/docker
+    id: verify-deps-inside-image
     args:
       - run
       - --rm
@@ -27,8 +29,9 @@ steps:
         print("tornado =", md.version('tornado'))
         print("IMAGE DEPS OK")
 
-      
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  # 4) Deploy OHNE Traffic (erzwingt neue Revision via ROLL_OUT)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: deploy-no-traffic
     entrypoint: gcloud
     args:
       - run
@@ -37,14 +40,49 @@ steps:
       - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
       - --region=europe-west6
       - --allow-unauthenticated
+      - --no-traffic
       - --port=8080
       - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
       - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
       - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
       - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
       - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
-      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
+      # WICHTIG: PUBLIC_URL/BASE_URL NICHT erneut setzen; die bleiben aus dem Service bestehen.
+      - --set-env-vars=ROLL_OUT=$COMMIT_SHA
+
+  # 5) Ready-Gate: warte bis neueste Revision Ready ist (max ~4 min)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: wait-ready
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        set -o pipefail
+        REGION=europe-west6
+        SERVICE=foodbot
+        rev=$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.latestCreatedRevisionName)')
+        echo "Candidate revision: $rev"
+        for i in {1..40}; do
+          ready=$(gcloud run revisions describe "$rev" --region="$REGION" --format="value(status.conditions[?type='Ready'].status)")
+          if [[ "$ready" == "True" ]]; then
+            echo "✅ $rev is Ready"
+            exit 0
+          fi
+          sleep 6
+        done
+        echo "❌ Revision not Ready in time"; exit 1
+
+  # 6) Traffic erst jetzt umschalten
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: shift-traffic
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update-traffic
+      - foodbot
+      - --region=europe-west6
+      - --to-latest
 
 images:
   - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
