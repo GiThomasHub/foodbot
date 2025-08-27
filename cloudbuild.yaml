@@ -1,5 +1,9 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
+
 steps:
-  # 1) Build
+  # 0) Build
   - name: gcr.io/cloud-builders/docker
     args:
       - build
@@ -7,15 +11,15 @@ steps:
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
       - .
 
-  # 2) Push
+  # 1) Push
   - name: gcr.io/cloud-builders/docker
     args:
       - push
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
 
-  # 3) Mini-Check: PTB/Tornado im Image vorhanden?
-  - name: gcr.io/cloud-builders/docker
-    id: verify-deps-inside-image
+  # 2) Sanity-Check: Libs im Image vorhanden?
+  - id: verify-deps-inside-image
+    name: gcr.io/cloud-builders/docker
     args:
       - run
       - --rm
@@ -29,9 +33,9 @@ steps:
         print("tornado =", md.version('tornado'))
         print("IMAGE DEPS OK")
 
-  # 4) Deploy OHNE Traffic (erzwingt neue Revision via ROLL_OUT)
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: deploy-no-traffic
+  # 3) Deploy ohne Traffic (Canary-Kandidat)
+  - id: deploy-no-traffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
       - run
@@ -47,12 +51,11 @@ steps:
       - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
       - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
       - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-      # Wichtig: PUBLIC_URL/BASE_URL nicht neu setzen – die bleiben auf dem Service.
       - --set-env-vars=ROLL_OUT=$COMMIT_SHA
 
-  # 5) Ready-Gate: warte bis neueste Revision Ready ist (max ~4 min)
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: wait-ready
+  # 4) Warten bis Revision "Ready" (robust via JSON+Python)
+  - id: wait-ready
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
       - -ceu
@@ -65,19 +68,19 @@ steps:
         echo "Candidate revision: $rev"
 
         get_field () {
-          # $1: field (status|reason|message)
+          # $1: status|reason|message
           gcloud run revisions describe "$rev" --region="$REGION" --format=json \
           | python3 - "$1" <<'PY'
-  import sys, json
-  data=json.load(sys.stdin)
-  want=sys.argv[1]
-  for c in data.get("status",{}).get("conditions",[]):
-      if c.get("type")=="Ready":
-          if want=="status": print(c.get("status",""))
-          elif want=="reason": print(c.get("reason",""))
-          elif want=="message": print(c.get("message",""))
-          break
-  PY
+import sys, json
+data=json.load(sys.stdin)
+want=sys.argv[1]
+for c in data.get("status", {}).get("conditions", []):
+    if c.get("type") == "Ready":
+        if want == "status":  print(c.get("status", ""))
+        elif want == "reason": print(c.get("reason", ""))
+        elif want == "message": print(c.get("message", ""))
+        break
+PY
         }
 
         # bis ~8 Minuten (80 * 6s)
@@ -105,10 +108,9 @@ steps:
         gcloud run revisions describe "$rev" --region="$REGION" --format="yaml(status.conditions)"
         exit 1
 
-
-  # 6) Traffic erst jetzt umschalten
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: shift-traffic
+  # 5) Traffic auf die neueste Ready-Revision schalten
+  - id: shift-traffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
       - run
@@ -120,7 +122,3 @@ steps:
 
 images:
   - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-
-options:
-  logging: CLOUD_LOGGING_ONLY
-  substitutionOption: ALLOW_LOOSE
