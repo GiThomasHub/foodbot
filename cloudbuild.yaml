@@ -1,29 +1,28 @@
 options:
   logging: CLOUD_LOGGING_ONLY
-  substitutionOption: ALLOW_LOOSE
 
 steps:
-  # 0) Build
+  # 1) Build
   - name: gcr.io/cloud-builders/docker
     args:
       - build
       - -t
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA
       - .
 
-  # 1) Push
+  # 2) Push
   - name: gcr.io/cloud-builders/docker
     args:
       - push
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA
 
-  # 2) Sanity-Check: Libs im Image vorhanden?
+  # 3) (optional) kurzer Check, dass wichtige Pakete im Image sind
   - id: verify-deps-inside-image
     name: gcr.io/cloud-builders/docker
     args:
       - run
       - --rm
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA
       - python
       - -c
       - |
@@ -33,84 +32,23 @@ steps:
         print("tornado =", md.version('tornado'))
         print("IMAGE DEPS OK")
 
-  # 3) Deploy ohne Traffic (Canary-Kandidat)
-  - id: deploy-no-traffic
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  # 4) Deploy (einfach & robust)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: gcloud
     args:
       - run
       - deploy
       - foodbot
-      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - --image=europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA
       - --region=europe-west6
       - --allow-unauthenticated
-      - --no-traffic
       - --port=8080
       - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
       - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
       - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
       - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
       - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-      - --set-env-vars=ROLL_OUT=$COMMIT_SHA
-
-  # 4) Warten, bis Revision "Ready" ist (max ~8min)
-  - id: wait-ready
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        REGION="europe-west6"
-        SERVICE="foodbot"
-
-        rev="$(gcloud run services describe "$SERVICE" --region="$REGION" \
-              --format='value(status.latestCreatedRevisionName)')"
-        echo "Candidate revision: $rev"
-
-        # bis zu ~8 Minuten warten (80 * 6s)
-        for i in {1..80}; do
-          cond="$(gcloud run revisions describe "$rev" --region="$REGION" \
-                 --format='yaml(status.conditions)')"
-          echo "Iter $i: checking Ready…"
-
-          # Fall A: wirklich Ready
-          if echo "$cond" | grep -q "type: Ready" && echo "$cond" | grep -q "status: 'True'"; then
-            echo "✅ $rev is Ready (Ready=True)"
-            exit 0
-          fi
-
-          # Fall B: klarer Health-Fehler -> früh abbrechen
-          if echo "$cond" | grep -q "reason: HealthCheckContainerError"; then
-            echo "❌ $rev failed health check"
-            echo "$cond"
-            exit 2
-          fi
-
-          # Fall C: Revision ist 'Retired' (0% Traffic) – das ist OK für Canary
-          if echo "$cond" | grep -q "reason: Retired" && echo "$cond" | grep -q "type: Ready"; then
-            echo "ℹ️ $rev is Retired (0% traffic) but Ready; continuing."
-            exit 0
-          fi
-
-          sleep 6
-        done
-
-        echo "❌ Revision not Ready in time"
-        echo "$cond"
-        exit 1
-
-
-  # 5) Traffic auf die neueste Ready-Revision schalten
-  - id: shift-traffic
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: gcloud
-    args:
-      - run
-      - services
-      - update-traffic
-      - foodbot
-      - --region=europe-west6
-      - --to-latest
+      - --set-env-vars=PUBLIC_URL=https://foodbot-1055976146993.europe-west6.run.app,BASE_URL=https://foodbot-1055976146993.europe-west6.run.app,ROLL_OUT=$COMMIT_SHA
 
 images:
-  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+  - europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA
