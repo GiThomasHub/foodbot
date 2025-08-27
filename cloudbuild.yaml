@@ -53,60 +53,52 @@ steps:
       - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
       - --set-env-vars=ROLL_OUT=$COMMIT_SHA
 
-  # 4) Warten bis Revision "Ready" (robust via JSON+Python)
+  # 4) Warten, bis Revision "Ready" ist (max ~8min)
   - id: wait-ready
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
     entrypoint: bash
     args:
       - -ceu
       - |
-        set -o pipefail
-        REGION=europe-west6
-        SERVICE=foodbot
+        REGION="europe-west6"
+        SERVICE="foodbot"
 
-        rev="$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.latestCreatedRevisionName)')"
+        rev="$(gcloud run services describe "$SERVICE" --region="$REGION" \
+              --format='value(status.latestCreatedRevisionName)')"
         echo "Candidate revision: $rev"
 
-        get_field () {
-          # $1: status|reason|message
-          gcloud run revisions describe "$rev" --region="$REGION" --format=json \
-          | python3 - "$1" <<'PY'
-import sys, json
-data=json.load(sys.stdin)
-want=sys.argv[1]
-for c in data.get("status", {}).get("conditions", []):
-    if c.get("type") == "Ready":
-        if want == "status":  print(c.get("status", ""))
-        elif want == "reason": print(c.get("reason", ""))
-        elif want == "message": print(c.get("message", ""))
-        break
-PY
-        }
+        # bis zu ~8 Minuten warten (80 * 6s)
+        for i in {1..80}; do
+          cond="$(gcloud run revisions describe "$rev" --region="$REGION" \
+                 --format='yaml(status.conditions)')"
+          echo "Iter $i: checking Ready…"
 
-        # bis ~8 Minuten (80 * 6s)
-        for i in $(seq 1 80); do
-          ready="$(get_field status)"
-          reason="$(get_field reason)"
-          echo "Iter $i: Ready=${ready:-<empty>} Reason=${reason:-<empty>}"
-
-          if [ "$ready" = "True" ]; then
-            echo "✅ $rev is Ready"
+          # Fall A: wirklich Ready
+          if echo "$cond" | grep -q "type: Ready" && echo "$cond" | grep -q "status: 'True'"; then
+            echo "✅ $rev is Ready (Ready=True)"
             exit 0
           fi
 
-          if [ "$reason" = "HealthCheckContainerError" ]; then
-            echo "❌ $rev failed health check:"
-            get_field message || true
+          # Fall B: klarer Health-Fehler -> früh abbrechen
+          if echo "$cond" | grep -q "reason: HealthCheckContainerError"; then
+            echo "❌ $rev failed health check"
+            echo "$cond"
             exit 2
+          fi
+
+          # Fall C: Revision ist 'Retired' (0% Traffic) – das ist OK für Canary
+          if echo "$cond" | grep -q "reason: Retired" && echo "$cond" | grep -q "type: Ready"; then
+            echo "ℹ️ $rev is Retired (0% traffic) but Ready; continuing."
+            exit 0
           fi
 
           sleep 6
         done
 
         echo "❌ Revision not Ready in time"
-        echo "Last conditions:"
-        gcloud run revisions describe "$rev" --region="$REGION" --format="yaml(status.conditions)"
+        echo "$cond"
         exit 1
+
 
   # 5) Traffic auf die neueste Ready-Revision schalten
   - id: shift-traffic
