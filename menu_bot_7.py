@@ -74,25 +74,6 @@ def _compute_base_url():
         url = url[:-1]
     return url
 
-def _make_web_app():
-    """
-    Kleine AIOHTTP-App für Health-/Root-Checks.
-    Gibt 200 OK auf /, /healthz und /favicon.ico zurück.
-    """
-    try:
-        app = web.Application()
-
-        async def ok(_request):
-            return web.Response(text="OK", content_type="text/plain")
-
-        app.router.add_get("/", ok)
-        app.router.add_get("/healthz", ok)
-        app.router.add_get("/favicon.ico", ok)
-        return app
-    except Exception as e:
-        # Falls aiohttp fehlen sollte, einfach ohne custom app starten
-        print(f"ℹ️ Konnte web_app nicht erstellen (aiohttp?): {e}")
-        return None
 
 
 # === ENV & Sheets Setup ===
@@ -4068,7 +4049,6 @@ def main():
             url_path=url_path,
             webhook_url=webhook_url,      # <-- entscheidend
             secret_token=WEBHOOK_SECRET,
-            web_app=_make_web_app(),  # liefert 200 OK für / & /healthz
         )
     elif BASE_URL:
         # Lokal mit PUBLIC_URL (z.B. ngrok)
