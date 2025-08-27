@@ -60,17 +60,41 @@ steps:
         set -o pipefail
         REGION=europe-west6
         SERVICE=foodbot
-        rev=$(gcloud run services describe "$$SERVICE" --region="$$REGION" --format='value(status.latestCreatedRevisionName)')
+
+        rev=$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+              --format='value(status.latestCreatedRevisionName)')
         echo "Candidate revision: $$rev"
-        for i in {1..40}; do
-          ready=$(gcloud run revisions describe "$$rev" --region="$$REGION" --format="value(status.conditions[?type='Ready'].status)")
+
+        # Bis zu ~8 Minuten warten (80 * 6s), mit Fortschrittsausgabe.
+        for i in {1..80}; do
+          ready=$(gcloud run revisions describe "$$rev" --region="$$REGION" \
+                  --format="value(status.conditions[?type='Ready'].status)")
+          reason=$(gcloud run revisions describe "$$rev" --region="$$REGION" \
+                  --format="value(status.conditions[?type='Ready'].reason)")
+          msg=$(gcloud run revisions describe "$$rev" --region="$$REGION" \
+               --format="value(status.conditions[?type='Ready'].message)")
+
+          echo "Iter $$i: Ready=$$ready Reason=$$reason"
           if [[ "$$ready" == "True" ]]; then
             echo "✅ $$rev is Ready"
             exit 0
           fi
+
+          # Falls klarer Health-Fehler → früh abbrechen mit hilfreicher Meldung
+          if [[ "$$reason" == "HealthCheckContainerError" ]]; then
+            echo "❌ $$rev failed health check:"
+            echo "$$msg"
+            exit 2
+          fi
+
           sleep 6
         done
-        echo "❌ Revision not Ready in time"; exit 1
+
+        echo "❌ Revision not Ready in time"
+        echo "Last conditions:"
+        gcloud run revisions describe "$$rev" --region="$$REGION" --format="yaml(status.conditions)"
+        exit 1
+
 
   # 6) Traffic erst jetzt umschalten
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
