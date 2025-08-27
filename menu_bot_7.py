@@ -59,8 +59,19 @@ logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
 
 MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SHOW_LIST, FERTIG_PERSONEN, REZEPT_INDEX, REZEPT_PERSONEN, TAUSCHE_SELECT, TAUSCHE_CONFIRM, ASK_CONFIRM, EXPORT_OPTIONS, FAV_OVERVIEW, FAV_DELETE_SELECT, PDF_EXPORT_CHOICE, FAV_ADD_SELECT, RESTART_CONFIRM, PROFILE_CHOICE, PROFILE_NEW_A, PROFILE_NEW_B, PROFILE_NEW_C, PROFILE_OVERVIEW, QUICKONE_START, QUICKONE_CONFIRM, PERSONS_SELECTION, PERSONS_MANUAL, MENU_COUNT, MENU_AUFWAND = range(29)
 
-
-
+# HELPER:
+def _compute_base_url():
+    """
+    Nimmt PUBLIC_URL oder BASE_URL aus den Env-Vars, trimmt Trailing Slash.
+    Gibt None zurück, wenn nichts gesetzt ist.
+    """
+    url = os.getenv("PUBLIC_URL") or os.getenv("BASE_URL")
+    if not url:
+        return None
+    url = url.strip()
+    if url.endswith("/"):
+        url = url[:-1]
+    return url
 
 
 # === ENV & Sheets Setup ===
