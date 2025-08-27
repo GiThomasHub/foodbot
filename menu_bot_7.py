@@ -4033,13 +4033,19 @@ def main():
     url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
 
     if os.getenv("K_SERVICE"):
-        # Cloud Run: starte IMMER den PTB-Webhook-Server ohne webhook_url
-        # (Telegram-Webhook setzt du ja extern per setWebhook)
-        print(f"▶️ Cloud Run Webhook auf :{port} path=/{url_path} (ohne webhook_url)")
+        # Cloud Run: IMMER eine öffentliche https-URL an PTB übergeben,
+        # damit setWebhook() klappt und der Prozess nicht crasht.
+        base = BASE_URL or _compute_base_url()
+        if not base:
+            # letzte Rettung: versuche die Cloud-Run-URL zu ermitteln
+            base = _compute_base_url()
+        webhook_url = f"{base.rstrip('/')}/{url_path}"
+        print(f"▶️ Cloud Run Webhook auf :{port} → {webhook_url}")
         app.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=url_path,
+            webhook_url=webhook_url,      # <-- entscheidend
             secret_token=WEBHOOK_SECRET,
         )
     elif BASE_URL:
