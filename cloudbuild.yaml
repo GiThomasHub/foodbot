@@ -1,108 +1,53 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - .
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
+  # nach dem Push-Step einfügen
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'verify-deps-inside-image'
+    args:
+      - run
+      - --rm
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - python
+      - -c
+      - |
+        import importlib.metadata as md
+        import telegram, telegram.ext, tornado
+        print("PTB =", md.version('python-telegram-bot'))
+        print("tornado =", md.version('tornado'))
+        print("IMAGE DEPS OK")
+
+      
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - foodbot
+      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - --region=europe-west6
+      - --allow-unauthenticated
+      - --port=8080
+      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
+      - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
+      - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
+      - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
+      - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
+      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
+
+images:
+  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
 options:
   logging: CLOUD_LOGGING_ONLY
-
-steps:
-# 1) Build
-- name: gcr.io/cloud-builders/docker
-  args:
-    - build
-    - -t
-    - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-    - .
-
-# 2) Push
-- name: gcr.io/cloud-builders/docker
-  args:
-    - push
-    - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-
-# 3) Optional: schneller Sanity-Check im Image
-- name: gcr.io/cloud-builders/docker
-  id: verify-deps-inside-image
-  args:
-    - run
-    - --rm
-    - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-    - python
-    - -c
-    - |
-      import importlib.metadata as md
-      import telegram, tornado
-      print("PTB =", md.version('python-telegram-bot'))
-      print("tornado =", md.version('tornado'))
-      print("IMAGE DEPS OK")
-
-# 4) Deploy der neuen Revision mit 0% Traffic
-- name: gcr.io/google.com/cloudsdktool/cloud-sdk
-  id: deploy-no-traffic
-  entrypoint: gcloud
-  args:
-    - run
-    - deploy
-    - foodbot
-    - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-    - --region=europe-west6
-    - --no-traffic
-    - --allow-unauthenticated
-    - --port=8080
-    - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
-    - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
-    - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
-    - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
-    - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-    # Nur ROLL_OUT setzen; PUBLIC_URL/BASE_URL bleiben wie im Service gesetzt
-    - --set-env-vars=ROLL_OUT=$COMMIT_SHA
-
-# 5) Auf Ready der *Kandidatenrevision* warten (nicht auf latestReady des Service)
-- name: gcr.io/google.com/cloudsdktool/cloud-sdk
-  id: wait-ready
-  entrypoint: bash
-  args:
-    - -ceu
-    - |
-      set -o pipefail
-      REGION="europe-west6"
-      SERVICE="foodbot"
-
-      cand=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
-              --format='value(status.latestCreatedRevisionName)')
-      echo "Candidate revision: $$cand"
-
-      for i in {1..80}; do
-        ready=$$(gcloud run revisions describe "$$cand" --region="$$REGION" \
-                --format="value(status.conditions[?type='Ready'].status)")
-        reason=$$(gcloud run revisions describe "$$cand" --region="$$REGION" \
-                 --format="value(status.conditions[?type='Ready'].reason)")
-        echo "Iter $$i: Ready=$$ready Reason=$$reason"
-
-        if [[ "$$ready" == "True" ]]; then
-          echo "✅ $$cand is Ready (even if Retired w/ 0% traffic)"
-          exit 0
-        fi
-
-        if [[ "$$reason" == "HealthCheckContainerError" ]]; then
-          echo "❌ $$cand failed health check"
-          gcloud run revisions describe "$$cand" --region="$$REGION" --format="yaml(status.conditions)"
-          exit 2
-        fi
-
-        sleep 6
-      done
-
-      echo "❌ $$cand did not become Ready in time"
-      gcloud run revisions describe "$$cand" --region="$$REGION" --format="yaml(status.conditions)"
-      exit 1
-
-# 6) Nur wenn Ready: Traffic auf Kandidatenrevision umlegen
-- name: gcr.io/google.com/cloudsdktool/cloud-sdk
-  id: shift-traffic
-  entrypoint: bash
-  args:
-    - -ceu
-    - |
-      REGION="europe-west6"
-      SERVICE="foodbot"
-      cand=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
-              --format='value(status.latestCreatedRevisionName)')
-      echo "Shifting 100% traffic to $$cand"
-      gcloud run services update-traffic "$$SERVICE" --region="$$REGION" --to-revisions "$$cand=100"
