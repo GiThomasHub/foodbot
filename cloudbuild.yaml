@@ -47,7 +47,7 @@ steps:
       - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
       - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
       - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-      # WICHTIG: PUBLIC_URL/BASE_URL NICHT erneut setzen; die bleiben aus dem Service bestehen.
+      # Wichtig: PUBLIC_URL/BASE_URL nicht neu setzen – die bleiben auf dem Service.
       - --set-env-vars=ROLL_OUT=$COMMIT_SHA
 
   # 5) Ready-Gate: warte bis neueste Revision Ready ist (max ~4 min)
@@ -60,12 +60,12 @@ steps:
         set -o pipefail
         REGION=europe-west6
         SERVICE=foodbot
-        rev=$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.latestCreatedRevisionName)')
-        echo "Candidate revision: $rev"
+        rev=$(gcloud run services describe "$$SERVICE" --region="$$REGION" --format='value(status.latestCreatedRevisionName)')
+        echo "Candidate revision: $$rev"
         for i in {1..40}; do
-          ready=$(gcloud run revisions describe "$rev" --region="$REGION" --format="value(status.conditions[?type='Ready'].status)")
-          if [[ "$ready" == "True" ]]; then
-            echo "✅ $rev is Ready"
+          ready=$(gcloud run revisions describe "$$rev" --region="$$REGION" --format="value(status.conditions[?type='Ready'].status)")
+          if [[ "$$ready" == "True" ]]; then
+            echo "✅ $$rev is Ready"
             exit 0
           fi
           sleep 6
@@ -89,3 +89,4 @@ images:
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
