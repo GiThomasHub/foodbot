@@ -1,89 +1,53 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - -t
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - .
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
+  # nach dem Push-Step einfügen
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'verify-deps-inside-image'
+    args:
+      - run
+      - --rm
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - python
+      - -c
+      - |
+        import importlib.metadata as md
+        import telegram, telegram.ext, tornado
+        print("PTB =", md.version('python-telegram-bot'))
+        print("tornado =", md.version('tornado'))
+        print("IMAGE DEPS OK")
+
+      
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - foodbot
+      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - --region=europe-west6
+      - --allow-unauthenticated
+      - --port=8080
+      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
+      - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
+      - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
+      - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
+      - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
+      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
+
+images:
+  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
 options:
   logging: CLOUD_LOGGING_ONLY
-
-# Das erzeugte Image (nur Deko/Artefakte)
-images:
-- "europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA"
-
-steps:
-# 0) Build
-- name: gcr.io/cloud-builders/docker
-  id: build
-  args:
-    - build
-    - "-t"
-    - "europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA"
-    - "."
-
-# 1) Push
-- name: gcr.io/cloud-builders/docker
-  id: push
-  args:
-    - push
-    - "europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA"
-
-# 2) Deploy ohne Traffic (nur neue Revision anlegen)
-- name: gcr.io/google.com/cloudsdktool/cloud-sdk
-  id: deploy-no-traffic
-  entrypoint: gcloud
-  args:
-    - run
-    - deploy
-    - foodbot
-    - "--image=europe-west6-docker.pkg.dev/foodapp-463218/foodbot/foodbot:$COMMIT_SHA"
-    - "--region=europe-west6"
-    - "--allow-unauthenticated"
-    - "--no-traffic"
-    - "--port=8080"
-    - "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest"
-    - "--set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest"
-    - "--set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest"
-    - "--set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest"
-    - "--set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest"
-    - "--set-env-vars=ROLL_OUT=$COMMIT_SHA"
-
-# 3) Tagging & Traffic (neu, korrekt)
-- name: gcr.io/google.com/cloudsdktool/cloud-sdk
-  id: tag-and-split
-  entrypoint: bash
-  args:
-    - -ceu
-    - |
-      set -o pipefail
-      REGION="europe-west6"
-      SERVICE="foodbot"
-
-      STABLE=$(gcloud run services describe "$SERVICE" --region="$REGION" \
-        --format='value(status.latestReadyRevisionName)')
-      CANDIDATE=$(gcloud run services describe "$SERVICE" --region="$REGION" \
-        --format='value(status.latestCreatedRevisionName)')
-
-      echo "Stable: $STABLE | Canary-Candidate: $CANDIDATE"
-      if [[ -z "$STABLE" || -z "$CANDIDATE" ]]; then
-        echo "❌ Konnte STABLE oder CANDIDATE nicht bestimmen."
-        exit 1
-      fi
-
-      gcloud run services update-traffic "$SERVICE" --region="$REGION" --remove-tag stable || true
-      gcloud run services update-traffic "$SERVICE" --region="$REGION" --remove-tag canary || true
-
-      gcloud run services update-traffic "$SERVICE" --region="$REGION" \
-        --add-tag "$STABLE=stable" \
-        --add-tag "$CANDIDATE=canary"
-
-      gcloud run services update-traffic "$SERVICE" --region="$REGION" \
-        --to-tags stable=100,canary=0
-
-      echo "✅ Tags & Traffic gesetzt (stable=100%, canary=0%)."
-
-# 4) Nur noch Status ausgeben (optional)
-- name: gcr.io/google.com/cloudsdktool/cloud-sdk
-  id: print-status
-  entrypoint: bash
-  args:
-    - -ceu
-    - |
-      REGION="europe-west6"
-      SERVICE="foodbot"
-      gcloud run services describe "$SERVICE" --region="$REGION" \
-        --format="yaml(status.traffic,status.latestReadyRevisionName,status.latestCreatedRevisionName)"
