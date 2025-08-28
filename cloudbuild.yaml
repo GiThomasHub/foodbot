@@ -1,53 +1,136 @@
+# Cloud Build pipeline for Foodbot (Cloud Run blue/green without tags)
+# Region: europe-west6, Service: foodbot
+# Builds & pushes image, deploys with --no-traffic, waits for Ready=True (fail early on HealthCheckContainerError),
+# hits /webhook/health on the service URL, then flips 100% traffic to the candidate revision.
+
+timeout: "1200s" # genug Puffer für Build + ~8 Min Ready-Window
+
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - build
-      - -t
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-      - .
+  # 1) Build Docker image
+  - id: "Build image"
+    name: "gcr.io/cloud-builders/docker"
+    args: [
+      "build",
+      "-t", "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
+      "."
+    ]
 
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - push
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+  # 2) Push to Artifact Registry
+  - id: "Push image"
+    name: "gcr.io/cloud-builders/docker"
+    args: [
+      "push",
+      "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+    ]
 
-  # nach dem Push-Step einfügen
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'verify-deps-inside-image'
+  # 3) Deploy new revision with 0% traffic (secrets nur referenzieren)
+  - id: "Deploy (no-traffic)"
+    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+    entrypoint: bash
     args:
-      - run
-      - --rm
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-      - python
-      - -c
+      - -ceu
       - |
-        import importlib.metadata as md
-        import telegram, telegram.ext, tornado
-        print("PTB =", md.version('python-telegram-bot'))
-        print("tornado =", md.version('tornado'))
-        print("IMAGE DEPS OK")
+        set -o pipefail
+        IMAGE="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+        echo "➡️  Deploying image: ${IMAGE}"
+        gcloud run deploy foodbot \
+          --region=europe-west6 \
+          --platform=managed \
+          --image="${IMAGE}" \
+          --no-traffic \
+          --quiet \
+          --set-secrets \
+            TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,\
+            OPENAI_API_KEY=OPENAI_API_KEY:latest,\
+            GITHUB_TOKEN=GITHUB_TOKEN:latest,\
+            TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,\
+            GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
 
-      
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
+        CAND="$(gcloud run services describe foodbot --region europe-west6 --format='value(status.latestCreatedRevisionName)')"
+        echo "📦 Candidate revision: ${CAND}"
+        # für Folgeschritt ablegen
+        echo -n "${CAND}" > /workspace/candidate.txt
+
+  # 4) Verify candidate (wait Ready, fail early on HealthCheckContainerError), health-check, then flip 100% traffic
+  - id: "Verify → Health → Traffic shift"
+    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"  # enthält curl
+    entrypoint: bash
     args:
-      - run
-      - deploy
-      - foodbot
-      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-      - --region=europe-west6
-      - --allow-unauthenticated
-      - --port=8080
-      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
-      - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
-      - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
-      - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
-      - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
-      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
+      - -ceu
+      - |
+        set -o pipefail
+
+        SERVICE="foodbot"
+        REGION="europe-west6"
+        CAND="$(cat /workspace/candidate.txt)"
+
+        dump_logs() {
+          echo "----- 🔎 Recent logs for ${CAND} -----"
+          # Letzte 200 Text-Logs der Revision
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.service_name="'${SERVICE}'" AND resource.labels.revision_name="'${CAND}'"' \
+            --limit=200 --order=desc --format='value(textPayload)' || true
+          echo "----- end logs -----"
+        }
+
+        echo "⏳ Waiting for Ready=True (max ~8 min) on ${CAND} ..."
+        READY="False"
+        ATTEMPTS=80  # 80 x 6s = 480s ~ 8 Minuten
+        for i in $(seq 1 ${ATTEMPTS}); do
+          READY="$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format="value(status.conditions[?type='Ready'].status)")"
+          REASON="$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format="value(status.conditions[?type='Ready'].reason)")"
+          SERVING_STATE="$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format="value(status.servingState)")"
+          echo "  [${i}/${ATTEMPTS}] Ready=${READY:-?} reason=${REASON:--} servingState=${SERVING_STATE:--}"
+
+          # Sofortiger Fail, wenn HealthCheckContainerError gemeldet wird
+          case "${REASON}" in
+            HEALTH_CHECK_CONTAINER_ERROR|HealthCheckContainerError)
+              echo "❌ Ready reason indicates HealthCheckContainerError → failing build."
+              dump_logs
+              exit 1
+              ;;
+            RETIRED|Retired|RETIRING|Reserving|RESERVE)
+              echo "❌ Revision state indicates retired/reserve (${REASON:-unknown}) — likely parallel deploy/rollback. Aborting."
+              dump_logs
+              exit 1
+              ;;
+          esac
+
+          if [[ "${READY}" == "True" ]]; then
+            echo "✅ ${CAND} is Ready."
+            break
+          fi
+          sleep 6
+        done
+
+        if [[ "${READY}" != "True" ]]; then
+          echo "❌ Timeout: ${CAND} did not reach Ready=True within window."
+          dump_logs
+          exit 1
+        fi
+
+        # Health-Check gegen Service-URL (öffentlich; 200 erwartet)
+        SERVICE_URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
+        echo "🌐 Service URL: ${SERVICE_URL}"
+        HC_URL="${SERVICE_URL%/}/webhook/health"
+        echo "🩺 Health-Check: GET ${HC_URL}"
+        HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${HC_URL}")" || true
+        echo "   → HTTP ${HTTP_CODE}"
+        if [[ "${HTTP_CODE}" != "200" ]]; then
+          echo "❌ Health-Check failed (expected 200)."
+          dump_logs
+          exit 1
+        fi
+
+        # Traffic-Shift: 100% auf Candidate
+        echo "🔁 Switching 100% traffic to ${CAND} ..."
+        gcloud run services update-traffic "${SERVICE}" \
+          --region "${REGION}" \
+          --to-revisions "${CAND}=100"
+
+        echo "✅ Traffic updated. Current mapping:"
+        gcloud run services describe "${SERVICE}" --region "${REGION}" \
+          --format='table(status.traffic[].revisionName,status.traffic[].percent)'
 
 images:
-  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-
-options:
-  logging: CLOUD_LOGGING_ONLY
+  - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
