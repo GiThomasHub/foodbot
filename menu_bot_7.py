@@ -4034,19 +4034,14 @@ def main():
     port = int(os.getenv("PORT", "8080"))
     url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
 
-    # ── Einheitlicher Webserver für Cloud Run & (optional) PUBLIC_URL ──
+    # Einheitlicher aiohttp-Server (Cloud Run & optional PUBLIC_URL)
     if os.getenv("K_SERVICE") or BASE_URL:
         base = BASE_URL or _compute_base_url()
-        if not base:
-            raise RuntimeError("Keine Basis-URL ermittelbar – setze PUBLIC_URL oder prüfe _compute_base_url().")
-        webhook_url = f"{base.rstrip('/')}/{url_path}"
-        print(f"▶️ Webhook-URL: {webhook_url}")
 
         async def _health(request):
             return web.Response(text="ok", status=200)
 
         async def _telegram_webhook(request):
-            # Optional: Secret-Header prüfen (Telegram sendet ihn, wenn gesetzt)
             if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
                 return web.Response(status=401)
             data = await request.json()
@@ -4055,32 +4050,38 @@ def main():
             return web.Response(status=204)
 
         async def _runner():
-            # PTB initialisieren und Webhook bei Telegram setzen
+            # PTB vorbereiten
             await app.initialize()
             await app.start()
-            await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
 
-            # aiohttp-App mit Health + Telegram-Webhook-Route
+            # aiohttp-Routen
             webapp = web.Application()
-            webapp.add_routes([
-                web.get("/webhook/health", _health),
-                web.post(f"/{url_path}", _telegram_webhook),
-            ])
+            webapp.add_routes([web.get("/webhook/health", _health)])
+
+            if base:
+                webhook_url = f"{base.rstrip('/')}/{url_path}"
+                print(f"▶️ Webhook-URL: {webhook_url}")
+                await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+                webapp.router.add_post(f"/{url_path}", _telegram_webhook)
+            else:
+                print("⚠️ PUBLIC_URL/BASE_URL nicht gesetzt → starte NUR Health-Endpoint (kein Telegram-WebHook).")
+
             runner = web.AppRunner(webapp)
             await runner.setup()
             site = web.TCPSite(runner, "0.0.0.0", port)
             await site.start()
             print(f"✅ Server läuft auf :{port}")
 
-            # Cloud Run hält den Prozess am Leben; warte-block
+            # Prozess offen halten (Cloud Run)
             await asyncio.Event().wait()
 
         asyncio.run(_runner())
 
     else:
-        # Lokalentwicklung ohne öffentl. URL → Polling
+        # Lokaler Fallback ohne öffentliche URL → Polling
         print("⚠️ Keine PUBLIC_URL → starte Polling (nur lokal geeignet).")
         app.run_polling()
+
 
 if __name__ == "__main__":
     main()
