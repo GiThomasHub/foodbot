@@ -16,8 +16,7 @@ steps:
     - push
     - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
 
-# 3) Deploy neue Revision mit 0% Traffic + Tag "canary"
-#    (PUBLIC_URL/BASE_URL lassen wir in Ruhe – die sind bereits korrekt am Service gesetzt)
+# 3) Deploy neue Revision mit 0% Traffic (noch OHNE Tag)
 - name: gcr.io/google.com/cloudsdktool/cloud-sdk
   id: deploy-no-traffic
   entrypoint: gcloud
@@ -28,7 +27,6 @@ steps:
     - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
     - --region=europe-west6
     - --no-traffic
-    - --tag=canary
     - --allow-unauthenticated
     - --port=8080
     - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
@@ -38,7 +36,43 @@ steps:
     - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
     - --set-env-vars=ROLL_OUT=$COMMIT_SHA
 
-# 4) Gesundprüfung: Tag-URL abrufen und /webhook/health pollen (HTTP 200)
+# 3b) Tag "canary" + 0% Traffic für die NEUE Revision hinzufügen (Bestand 100% bleibt)
+- name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  id: tag-canary
+  entrypoint: bash
+  args:
+    - -ceu
+    - |
+      REGION="europe-west6"
+      SERVICE="foodbot"
+
+      # Neueste erstellte Revision (Kandidat)
+      cand=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+        --format="value(status.latestCreatedRevisionName)")
+
+      if [[ -z "$$cand" ]]; then
+        echo "❌ Keine Kandidaten-Revision gefunden."
+        exit 2
+      fi
+
+      # Aktuelle(n) stabile(n) Traffic-Target(s) ermitteln (erste nehmen)
+      stable_list=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+        --format="value(status.traffic[?percent>0].revisionName)")
+      stable=$$(echo "$$stable_list" | awk '{print $$1}')
+
+      if [[ -z "$$stable" ]]; then
+        echo "❌ Kein stabiles Traffic-Target gefunden."
+        exit 3
+      fi
+
+      echo "Stable: $$stable | Canary-Candidate: $$cand"
+
+      # 100% auf stabil lassen, 0% auf Kandidat setzen + Tag vergeben
+      gcloud run services update-traffic "$$SERVICE" --region="$$REGION" \
+        --to-revisions "$$stable=100,$$cand=0" \
+        --tag "$$cand=canary"
+
+# 4) Health-Check über Tag-URL (/webhook/health muss 200 liefern)
 - name: gcr.io/google.com/cloudsdktool/cloud-sdk
   id: probe-canary
   entrypoint: bash
@@ -53,11 +87,11 @@ steps:
 
       if [[ -z "$$tag_url" ]]; then
         echo "❌ Keine canary-Tag-URL gefunden."
-        exit 3
+        exit 4
       fi
       echo "canary URL: $$tag_url"
 
-      # Bis ~2 Minuten warten (40 * 3s), bis /webhook/health == 200
+      # Bis ~2 Minuten warten (40 * 3s)
       for i in {1..40}; do
         code=$$(curl -s -o /dev/null -w "%{http_code}" "$$tag_url/webhook/health")
         echo "Health probe $$i: $$code"
@@ -69,9 +103,9 @@ steps:
       done
 
       echo "❌ Canary wurde nicht gesund (kein HTTP 200)."
-      exit 4
+      exit 5
 
-# 5) Nur wenn gesund: 100% Traffic auf diese Revision (über den Tag ermitteln)
+# 5) Nur wenn gesund → 100% Traffic auf die canary-Revision
 - name: gcr.io/google.com/cloudsdktool/cloud-sdk
   id: shift-traffic
   entrypoint: bash
@@ -85,8 +119,8 @@ steps:
         --format="value(status.traffic[?tag='canary'].revisionName)")
 
       if [[ -z "$$cand" ]]; then
-        echo "❌ Konnte Revision hinter Tag 'canary' nicht ermitteln."
-        exit 5
+        echo "❌ Konnte canary-Revision nicht ermitteln."
+        exit 6
       fi
 
       echo "🔀 Schalte 100% Traffic auf $$cand"
