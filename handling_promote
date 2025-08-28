@@ -1,0 +1,61 @@
+chmod +x promote.sh
+./promote.sh
+
+
+
+ 
+Was wird getestet? (und wie sieht “OK” aus)
+
+Test A – Revision-Readiness
+- Intern prüft das Skript status.conditions[type=Ready].status == True.
+- OK: “✅ <rev> ist Ready.”
+- Fail: HealthCheckContainerError oder nach Timeout nicht Ready → kein Traffic-Shift, Skript beendet sich mit Fehlercode.
+
+Test B – PUBLIC_URL / BASE_URL
+- Erwartet beide auf Service-URL (z. B. https://foodbot-…a.run.app).
+- OK: nichts zu tun / Skript setzt sie auf Service-URL und wartet erneut auf Ready.
+- Fail: neue Revision wird nicht Ready → Skript bricht ab, kein Shift.
+
+Test C – Webhook-Health
+- curl -fsS "$URL/webhook/health" muss HTTP 200 liefern.
+- OK: “✅ /webhook/health OK”
+- Fail: Rollback auf vorige Stable-Revision.
+
+Test D – Requests-Log (informativ)
+- Es werden die letzten Einträge aus run.googleapis.com/requests gezeigt.
+- Du solltest POST auf /webhook/<secret> mit 200 sehen, sobald Telegram den Hook triggert.
+
+
+Was tun, wenn etwas schief läuft?
+
+a) HealthCheckContainerError während Ready-Wartezeit:
+- gcloud run revisions describe <rev> --region=europe-west6 --format='yaml(status.conditions)'
+- App-Logs ziehen (stderr/stdout):
+
+gcloud logging read \
+  "resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE AND resource.labels.revision_name=<rev> AND logName=projects/$PROJECT/logs/run.googleapis.com%2Fstderr" \
+  --limit=100 --order=desc --format='value(textPayload)'
+
+- Fehler fixen, neu committen.
+
+b) /webhook/health schlägt fehl:
+
+- Prüfe Env:
+
+gcloud run services describe $SERVICE --region=europe-west6 \
+  --format="yaml(spec.template.spec.containers[0].env)"
+
+- Wenn PUBLIC_URL/BASE_URL falsch/leer:
+
+URL=$(gcloud run services describe $SERVICE --region=europe-west6 --format='value(status.url)')
+gcloud run services update $SERVICE --region=europe-west6 \
+  --no-traffic \
+  --set-env-vars="PUBLIC_URL=$URL,BASE_URL=$URL,ROLL_OUT=$(date +%s)"
+
+- Danach ./promote.sh erneut laufen lassen.
+
+c) Sofortiger Rollback (manuell):
+
+STABLE=$(gcloud run services describe $SERVICE --region=europe-west6 \
+  --format='value(status.latestReadyRevisionName)')
+gcloud run services update-traffic $SERVICE --region=europe-west6 --to-revisions "$STABLE=100"
