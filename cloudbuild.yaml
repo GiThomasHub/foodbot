@@ -49,19 +49,24 @@ steps:
       # Neueste erstellte Revision (Kandidat)
       cand=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
         --format="value(status.latestCreatedRevisionName)")
-
       if [[ -z "$$cand" ]]; then
         echo "❌ Keine Kandidaten-Revision gefunden."
         exit 2
       fi
 
-      # Aktuelle(n) stabile(n) Traffic-Target(s) ermitteln (erste nehmen)
-      stable_list=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+      # 1. Versuch: stabiles Target mit percent>0
+      stable=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
         --format="value(status.traffic[?percent>0].revisionName)")
-      stable=$$(echo "$$stable_list" | awk '{print $$1}')
+
+      # Fallback: latestReadyRevisionName (z. B. wenn status.traffic leer ist)
+      if [[ -z "$$stable" ]]; then
+        stable=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+          --format="value(status.latestReadyRevisionName)")
+      fi
 
       if [[ -z "$$stable" ]]; then
-        echo "❌ Kein stabiles Traffic-Target gefunden."
+        echo "❌ Kein stabiles Traffic-Target ermittelbar (auch latestReady leer)."
+        echo "   Bitte einmalig manuell wie in der Anleitung ausführen."
         exit 3
       fi
 
@@ -71,6 +76,7 @@ steps:
       gcloud run services update-traffic "$$SERVICE" --region="$$REGION" \
         --to-revisions "$$stable=100,$$cand=0" \
         --tag "$$cand=canary"
+
 
 # 4) Health-Check über Tag-URL (/webhook/health muss 200 liefern)
 - name: gcr.io/google.com/cloudsdktool/cloud-sdk
