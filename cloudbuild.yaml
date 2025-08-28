@@ -1,21 +1,19 @@
 steps:
-  # 1) Build
-  - name: gcr.io/cloud-builders/docker
+  - name: 'gcr.io/cloud-builders/docker'
     args:
       - build
       - -t
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
       - .
 
-  # 2) Push
-  - name: gcr.io/cloud-builders/docker
+  - name: 'gcr.io/cloud-builders/docker'
     args:
       - push
       - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
 
-  # 3) Sanity-Check: inside image
-  - name: gcr.io/cloud-builders/docker
-    id: verify-deps-inside-image
+  # nach dem Push-Step einfügen
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'verify-deps-inside-image'
     args:
       - run
       - --rm
@@ -29,34 +27,24 @@ steps:
         print("tornado =", md.version('tornado'))
         print("IMAGE DEPS OK")
 
-  # 4) Deploy (ohne Traffic). PUBLIC_URL/BASE_URL aus bestehendem Service lesen.
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    id: deploy-no-traffic
-    entrypoint: bash
+      
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
     args:
-      - -ceu
-      - |
-        set -o pipefail
-        REGION='europe-west6'
-        SERVICE='foodbot'
-        IMAGE="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
-
-        # Service-URL holen (Service existiert bei dir bereits)
-        SERVICE_URL="$(gcloud run services describe "$SERVICE" --region="$REGION" --format='value(status.url)')" || true
-        echo "SERVICE_URL=${SERVICE_URL:-<leer>}"
-
-        gcloud run deploy "$SERVICE" \
-          --image="$IMAGE" \
-          --region="$REGION" \
-          --allow-unauthenticated \
-          --port=8080 \
-          --no-traffic \
-          --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest \
-          --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest \
-          --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest \
-          --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest \
-          --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest \
-          --set-env-vars="PUBLIC_URL=${SERVICE_URL},BASE_URL=${SERVICE_URL},ROLL_OUT=$COMMIT_SHA"
+      - run
+      - deploy
+      - foodbot
+      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - --region=europe-west6
+      - --allow-unauthenticated
+      - --port=8080
+      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
+      - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
+      - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
+      - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
+      - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
+      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
 
 images:
   - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
