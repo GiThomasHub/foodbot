@@ -1,53 +1,93 @@
-steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - build
-      - -t
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-      - .
-
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - push
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-
-  # nach dem Push-Step einfügen
-  - name: 'gcr.io/cloud-builders/docker'
-    id: 'verify-deps-inside-image'
-    args:
-      - run
-      - --rm
-      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-      - python
-      - -c
-      - |
-        import importlib.metadata as md
-        import telegram, telegram.ext, tornado
-        print("PTB =", md.version('python-telegram-bot'))
-        print("tornado =", md.version('tornado'))
-        print("IMAGE DEPS OK")
-
-      
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      - run
-      - deploy
-      - foodbot
-      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-      - --region=europe-west6
-      - --allow-unauthenticated
-      - --port=8080
-      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
-      - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
-      - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
-      - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
-      - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
-      # Beim 2. Deploy PUBLIC_URL setzen (s.u.)
-      # - --set-env-vars=PUBLIC_URL=https://<CloudRun-URL>
-
-images:
-  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
-
 options:
   logging: CLOUD_LOGGING_ONLY
+
+steps:
+# 1) Build
+- name: gcr.io/cloud-builders/docker
+  args:
+    - build
+    - -t
+    - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+    - .
+
+# 2) Push
+- name: gcr.io/cloud-builders/docker
+  args:
+    - push
+    - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+
+# 3) Deploy neue Revision mit 0% Traffic + Tag "canary"
+#    (PUBLIC_URL/BASE_URL lassen wir in Ruhe – die sind bereits korrekt am Service gesetzt)
+- name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  id: deploy-no-traffic
+  entrypoint: gcloud
+  args:
+    - run
+    - deploy
+    - foodbot
+    - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+    - --region=europe-west6
+    - --no-traffic
+    - --tag=canary
+    - --allow-unauthenticated
+    - --port=8080
+    - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest
+    - --set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest
+    - --set-secrets=GITHUB_TOKEN=GITHUB_TOKEN:latest
+    - --set-secrets=TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest
+    - --set-secrets=GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+    - --set-env-vars=ROLL_OUT=$COMMIT_SHA
+
+# 4) Gesundprüfung: Tag-URL abrufen und /webhook/health pollen (HTTP 200)
+- name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  id: probe-canary
+  entrypoint: bash
+  args:
+    - -ceu
+    - |
+      REGION="europe-west6"
+      SERVICE="foodbot"
+
+      tag_url=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+        --format="value(status.traffic[?tag='canary'].url)")
+
+      if [[ -z "$$tag_url" ]]; then
+        echo "❌ Keine canary-Tag-URL gefunden."
+        exit 3
+      fi
+      echo "canary URL: $$tag_url"
+
+      # Bis ~2 Minuten warten (40 * 3s), bis /webhook/health == 200
+      for i in {1..40}; do
+        code=$$(curl -s -o /dev/null -w "%{http_code}" "$$tag_url/webhook/health")
+        echo "Health probe $$i: $$code"
+        if [[ "$$code" == "200" ]]; then
+          echo "✅ Canary gesund."
+          exit 0
+        fi
+        sleep 3
+      done
+
+      echo "❌ Canary wurde nicht gesund (kein HTTP 200)."
+      exit 4
+
+# 5) Nur wenn gesund: 100% Traffic auf diese Revision (über den Tag ermitteln)
+- name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  id: shift-traffic
+  entrypoint: bash
+  args:
+    - -ceu
+    - |
+      REGION="europe-west6"
+      SERVICE="foodbot"
+
+      cand=$$(gcloud run services describe "$$SERVICE" --region="$$REGION" \
+        --format="value(status.traffic[?tag='canary'].revisionName)")
+
+      if [[ -z "$$cand" ]]; then
+        echo "❌ Konnte Revision hinter Tag 'canary' nicht ermitteln."
+        exit 5
+      fi
+
+      echo "🔀 Schalte 100% Traffic auf $$cand"
+      gcloud run services update-traffic "$$SERVICE" --region="$$REGION" --to-revisions "$$cand=100"
