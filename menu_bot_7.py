@@ -61,6 +61,46 @@ logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
 MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SHOW_LIST, FERTIG_PERSONEN, REZEPT_INDEX, REZEPT_PERSONEN, TAUSCHE_SELECT, TAUSCHE_CONFIRM, ASK_CONFIRM, EXPORT_OPTIONS, FAV_OVERVIEW, FAV_DELETE_SELECT, PDF_EXPORT_CHOICE, FAV_ADD_SELECT, RESTART_CONFIRM, PROFILE_CHOICE, PROFILE_NEW_A, PROFILE_NEW_B, PROFILE_NEW_C, PROFILE_OVERVIEW, QUICKONE_START, QUICKONE_CONFIRM, PERSONS_SELECTION, PERSONS_MANUAL, MENU_COUNT, MENU_AUFWAND = range(29)
 
 # HELPER:
+
+# === Cloud Run: Health + Telegram Webhook via aiohttp ===
+def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
+    from aiohttp import web
+    from telegram import Update
+
+    async def _health(_req):
+        return web.Response(text="OK", status=200)
+
+    async def _tg_webhook(req):
+        try:
+            data = await req.json()
+        except Exception:
+            return web.Response(text="bad json", status=400)
+        upd = Update.de_json(data, app.bot)
+        await app.process_update(upd)
+        return web.Response(text="OK", status=200)
+
+    aio = web.Application()
+    aio.router.add_get("/webhook/health", _health)
+    aio.router.add_post(f"/{url_path}", _tg_webhook)
+
+    async def _on_startup(_):
+        await app.initialize()
+        try:
+            await app.bot.set_webhook(url=webhook_url, secret_token=secret_token)
+            print("✅ set_webhook OK")
+        except Exception as e:
+            print(f"⚠️ set_webhook failed: {e} — continuing")
+        await app.start()
+
+    async def _on_cleanup(_):
+        await app.stop()
+        await app.shutdown()
+
+    aio.on_startup.append(_on_startup)
+    aio.on_cleanup.append(_on_cleanup)
+    web.run_app(aio, host="0.0.0.0", port=port)
+
+
 def _compute_base_url():
     """
     Nimmt PUBLIC_URL oder BASE_URL aus den Env-Vars, trimmt Trailing Slash.
@@ -4030,8 +4070,6 @@ def main():
     # (Cloud Run start moved into main())
 
 
-    print("✅ Bot läuft...")
-    # --- ab hier ersetzen ---
     print("✅ Bot läuft...")
     port = int(os.getenv("PORT", "8080"))
     url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
