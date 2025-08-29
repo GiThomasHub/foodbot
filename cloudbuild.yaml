@@ -1,4 +1,3 @@
-# Blue/Green mit tag-basiertem Health-Check (cand) und hartem 100%-Switch
 options:
   logging: CLOUD_LOGGING_ONLY
   substitutionOption: ALLOW_LOOSE
@@ -14,8 +13,8 @@ steps:
     name: gcr.io/cloud-builders/docker
     args: ["push","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"]
 
-  # 2) Deploy (0%) und Tagging vorbereiten
-  - id: deploy 0% (no-traffic)
+  # 2) Deploy (0%) + Tag cand an Kandidatenrevision hängen
+  - id: deploy 0% + tag=cand
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
@@ -26,36 +25,34 @@ steps:
         service="foodbot"
         img="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
 
-        echo "→ deploy ${service} (${region}) image ${img} (no-traffic)"
+        echo "→ deploy ${service} in ${region} (no-traffic) image=${img}"
         gcloud run deploy "${service}" \
           --region="${region}" \
           --image="${img}" \
           --no-traffic \
           --port=8080 \
           --allow-unauthenticated \
-          --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+          --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest \
+          --quiet
 
         cand="$(gcloud run services describe "${service}" --region "${region}" --format='value(status.latestCreatedRevisionName)')"
         live="$(gcloud run services describe "${service}" --region "${region}" --format='value(status.latestReadyRevisionName)')"
-        echo "candidate=${cand}"
-        echo "live=${live}"
+        echo "candidate=${cand}  live=${live}"
         test -n "${cand}" || { echo "❌ no candidate revision"; exit 10; }
 
-        # Tag 'cand' an Kandidat bei 0% hängen (Traffic der Live-Revision bleibt 100%)
+        # Tag 'cand' anhängen (0%); live bleibt 100%
         if [ -n "${live}" ] && [ "${live}" != "${cand}" ]; then
-          echo "→ set live=100%, cand=0% and tag cand"
           gcloud run services update-traffic "${service}" --region "${region}" \
             --to-revisions "${live}=100,${cand}=0" \
             --tag "${cand}=cand"
         else
-          echo "→ only one revision or same as live; add tag on candidate"
           gcloud run services update-traffic "${service}" --region "${region}" \
             --add-tag "${cand}=cand"
         fi
 
         printf '%s' "${cand}" > /workspace/cand.txt
 
-  # 3) Ready → Health → Traffic=100
+  # 3) Ready → Health → Traffic=100 (ohne Heredocs)
   - id: ready + health + traffic
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
@@ -68,23 +65,6 @@ steps:
         cand="$(cat /workspace/cand.txt)"
         echo "track candidate: ${cand}"
 
-        json_get() {
-          python3 - "$1" << 'PY'
-import sys, json
-field=sys.argv[1]
-d=json.load(sys.stdin)
-conds=d.get("status",{}).get("conditions",[])
-def pick(t,k):
-  for c in conds:
-    if c.get("type")==t: return c.get(k,"") or ""
-  return ""
-if field=="ready.status":  print(pick("Ready","status"))
-elif field=="ready.reason":print(pick("Ready","reason"))
-elif field=="active.status":print(pick("Active","status"))
-elif field=="url":         print(d.get("status",{}).get("url","") or d.get("status",{}).get("address",{}).get("url",""))
-PY
-        }
-
         dump_logs() {
           echo "== recent logs for ${cand} =="
           gcloud logging read \
@@ -93,7 +73,18 @@ PY
         }
         trap 'dump_logs' ERR
 
-        # Parallel-Deploy verhindern
+        # JSON-Parsing via Python One-Liner (keine Heredocs)
+        get_ready_status() {
+          python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((c.get("status","") for c in d.get("status",{}).get("conditions",[]) if c.get("type")=="Ready"), ""))'
+        }
+        get_ready_reason() {
+          python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((c.get("reason","") for c in d.get("status",{}).get("conditions",[]) if c.get("type")=="Ready"), ""))'
+        }
+        get_active_status() {
+          python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((c.get("status","") for c in d.get("status",{}).get("conditions",[]) if c.get("type")=="Active"), ""))'
+        }
+
+        # Parallel-Deploy verhindern & auf Ready warten (~8 Min)
         for i in $(seq 1 80); do
           latest="$(gcloud run services describe "${service}" --region "${region}" --format='value(status.latestCreatedRevisionName)')"
           if [ -n "${latest}" ] && [ "${latest}" != "${cand}" ]; then
@@ -102,9 +93,9 @@ PY
           fi
 
           js="$(gcloud run revisions describe "${cand}" --region "${region}" --format=json || true)"
-          ready="$(printf '%s' "${js}" | json_get ready.status | tr -d '\r')"
-          rreason="$(printf '%s' "${js}" | json_get ready.reason | tr -d '\r')"
-          astatus="$(printf '%s' "${js}" | json_get active.status | tr -d '\r')"
+          ready="$(printf '%s' "${js}" | get_ready_status | tr -d '\r')"
+          rreason="$(printf '%s' "${js}" | get_ready_reason | tr -d '\r')"
+          astatus="$(printf '%s' "${js}" | get_active_status | tr -d '\r')"
 
           printf '  [%02d/80] Ready=%s  ReadyReason=%s  Active=%s\n' "$i" "${ready:-?}" "${rreason:--}" "${astatus:--}"
 
@@ -114,7 +105,7 @@ PY
         done
         [ "${ready}" = "True" ] || { echo "❌ Ready not reached"; exit 21; }
 
-        # cand-URL (tag) bestimmen
+        # cand-URL (Tag) ermitteln und Health prüfen
         svc_url="$(gcloud run services describe "${service}" --region "${region}" --format='value(status.url)')"
         host="${svc_url#https://}"
         cand_url="https://cand---${host}"
