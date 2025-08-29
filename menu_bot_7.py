@@ -4031,38 +4031,76 @@ def main():
 
 
     print("✅ Bot läuft...")
+    # --- ab hier ersetzen ---
+    print("✅ Bot läuft...")
     port = int(os.getenv("PORT", "8080"))
     url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
 
+    from aiohttp import web
+
+    async def _health_route(_request):
+        return web.Response(text="OK")  # 200
+
+    async def _telegram_webhook(request):
+        # Telegram schickt POST JSON; an PTB weiterreichen
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
+        return web.Response(text="OK")
+
+    path = "/" + url_path.lstrip("/")
+
     if os.getenv("K_SERVICE"):
-        # Cloud Run: IMMER eine öffentliche https-URL an PTB übergeben,
-        # damit setWebhook() klappt und der Prozess nicht crasht.
-        base = BASE_URL or _compute_base_url()
+        # Cloud Run: öffentliche URL bestimmen (wie bisher)
+        base = BASE_URL or _compute_base_url() or ""
         if not base:
-            # letzte Rettung: versuche die Cloud-Run-URL zu ermitteln
-            base = _compute_base_url()
-        webhook_url = f"{base.rstrip('/')}/{url_path}"
+            base = _compute_base_url() or ""
+        webhook_url = f"{base.rstrip('/')}{path}"
         print(f"▶️ Cloud Run Webhook auf :{port} → {webhook_url}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=url_path,
-            webhook_url=webhook_url,      # <-- entscheidend
-            secret_token=WEBHOOK_SECRET,
-        )
+
+        aio = web.Application()
+        aio.router.add_get("/webhook/health", _health_route)
+        aio.router.add_post(path, _telegram_webhook)
+
+        async def _on_startup(_app):
+            await app.initialize()
+            await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+            await app.start()
+
+        async def _on_cleanup(_app):
+            await app.stop()
+            await app.shutdown()
+
+        aio.on_startup.append(_on_startup)
+        aio.on_cleanup.append(_on_cleanup)
+        web.run_app(aio, host="0.0.0.0", port=port)
+
     elif BASE_URL:
-        # Lokal mit PUBLIC_URL (z.B. ngrok)
-        webhook_url = f"{BASE_URL.rstrip('/')}/{url_path}"
+        # Lokal (ngrok o.ä.)
+        webhook_url = f"{BASE_URL.rstrip('/')}{path}"
         print(f"▶️ Lokaler Webhook auf :{port} → {webhook_url}")
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=url_path,
-            webhook_url=webhook_url,
-            secret_token=WEBHOOK_SECRET,
-        )
+
+        aio = web.Application()
+        aio.router.add_get("/webhook/health", _health_route)
+        aio.router.add_post(path, _telegram_webhook)
+
+        async def _on_startup(_app):
+            await app.initialize()
+            await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+            await app.start()
+
+        async def _on_cleanup(_app):
+            await app.stop()
+            await app.shutdown()
+
+        aio.on_startup.append(_on_startup)
+        aio.on_cleanup.append(_on_cleanup)
+        web.run_app(aio, host="0.0.0.0", port=port)
+
     else:
         print("⚠️ Keine PUBLIC_URL → starte Polling (nur lokal geeignet).")
         app.run_polling()
+    # --- ersetzen Ende ---
+
 if __name__ == "__main__":
     main()
