@@ -5,14 +5,17 @@ timeout: "1200s"
 steps:
   - id: "Build image"
     name: "gcr.io/cloud-builders/docker"
-    args: ["build",
-           "-t", "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
-           "."]
+    args:
+      - build
+      - -t
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - .
 
   - id: "Push image"
     name: "gcr.io/cloud-builders/docker"
-    args: ["push",
-           "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"]
+    args:
+      - push
+      - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
 
   - id: "Deploy (0% traffic)"
     name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
@@ -21,22 +24,20 @@ steps:
       - -ceu
       - |
         set -eo pipefail
-        REGION="europe-west6"
-        SERVICE="foodbot"
-        IMAGE="europe-west6-docker.pkg.dev/${PROJECT_ID}/foodbot/foodbot:${COMMIT_SHA}"
+        # KEINE $-Variablen ohne Escapes -> nur Built-ins direkt verwenden!
+        echo "🖼  Image: europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
 
-        echo "🖼  Image: ${IMAGE}"
-        gcloud run deploy "${SERVICE}" \
-          --region="${REGION}" \
-          --image="${IMAGE}" \
+        gcloud run deploy foodbot \
+          --region=europe-west6 \
+          --image="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA" \
           --no-traffic \
           --port=8080 \
           --allow-unauthenticated \
           --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
 
-        CAND="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.latestCreatedRevisionName)')"
-        echo "👤 Candidate: ${CAND}"
-        test -n "${CAND}" && echo -n "${CAND}" > /workspace/candidate.txt
+        CAND="$$(gcloud run services describe foodbot --region europe-west6 --format='value(status.latestCreatedRevisionName)')"
+        echo "👤 Candidate: $$CAND"
+        test -n "$$CAND" && echo -n "$$CAND" > /workspace/candidate.txt
 
   - id: "Ready + Health + Traffic"
     name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
@@ -45,39 +46,38 @@ steps:
       - -ceu
       - |
         set -euo pipefail
-        REGION="europe-west6"
-        SERVICE="foodbot"
-        CAND="$(cat /workspace/candidate.txt)"
+        CAND="$$(cat /workspace/candidate.txt)"
 
         dump_logs() {
-          echo "📜 Logs ${CAND}:"
+          echo "📜 Logs $$CAND:"
           gcloud logging read \
-            "resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE} AND resource.labels.revision_name=${CAND}" \
+            "resource.type=cloud_run_revision AND resource.labels.service_name=foodbot AND resource.labels.revision_name=$$CAND" \
             --limit=200 --order=desc --format='value(textPayload)' || true
         }
         trap 'echo "❌ Fehler"; dump_logs' ERR
 
         echo "⏳ Wait Ready=True ..."
-        for i in $(seq 1 80); do
-          READY="$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format="value(status.conditions[?type=Ready].status)")"
-          REASON="$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format="value(status.conditions[?type=Ready].reason)")"
-          printf "  [%02d/80] Ready=%s Reason=%s\n" "$i" "${READY:-?}" "${REASON:--}"
-          [[ "${REASON:-}" == *HealthCheckContainerError* ]] && { echo "❌ HealthCheckContainerError"; exit 20; }
-          [[ "${READY}" == "True" ]] && break
+        for i in $$($$SHELL -lc 'seq 1 80'); do
+          READY="$$(gcloud run revisions describe "$$CAND" --region europe-west6 --format="value(status.conditions[?type=Ready].status)")"
+          REASON="$$(gcloud run revisions describe "$$CAND" --region europe-west6 --format="value(status.conditions[?type=Ready].reason)")"
+          printf "  [%02d/80] Ready=%s Reason=%s\n" "$$i" "$${READY:-?}" "$${REASON:--}"
+          [[ "$${REASON:-}" == *HealthCheckContainerError* ]] && { echo "❌ HealthCheckContainerError"; exit 20; }
+          [[ "$$READY" == "True" ]] && break
           sleep 6
         done
-        [[ "${READY:-}" == "True" ]] || { echo "❌ Ready wurde nicht erreicht"; exit 21; }
+        [[ "$${READY:-}" == "True" ]] || { echo "❌ Ready wurde nicht erreicht"; exit 21; }
 
-        REV_URL="$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.url)')"
-        [[ -n "${REV_URL}" ]] || { echo "❌ Keine Revision-URL"; exit 22; }
-        echo "🩺 GET ${REV_URL%/}/webhook/health"
-        CODE="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${REV_URL%/}/webhook/health" || true)"
-        echo "   → HTTP ${CODE}"
-        [[ "${CODE}" == "200" ]] || { echo "❌ Health != 200"; exit 23; }
+        REV_URL="$$(gcloud run revisions describe "$$CAND" --region europe-west6 --format='value(status.url)')"
+        [[ -n "$$REV_URL" ]] || { echo "❌ Keine Revision-URL"; exit 22; }
 
-        echo "🔁 Traffic → ${CAND}=100"
-        gcloud run services update-traffic "${SERVICE}" --region "${REGION}" --to-revisions "${CAND}=100"
+        echo "🩺 GET $${REV_URL%/}/webhook/health"
+        CODE="$$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "$${REV_URL%/}/webhook/health" || true)"
+        echo "   → HTTP $$CODE"
+        [[ "$$CODE" == "200" ]] || { echo "❌ Health != 200"; exit 23; }
+
+        echo "🔁 Traffic → $$CAND=100"
+        gcloud run services update-traffic foodbot --region europe-west6 --to-revisions "$$CAND=100"
         echo "✅ Done."
 
 images:
-  - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
