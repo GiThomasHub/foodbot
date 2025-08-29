@@ -42,9 +42,15 @@ steps:
 
         # Tag 'cand' anhängen (0%); live bleibt 100%
         if [ -n "${live}" ] && [ "${live}" != "${cand}" ]; then
+          echo "→ set live=100%, cand=0%"
           gcloud run services update-traffic "${service}" --region "${region}" \
-            --to-revisions "${live}=100,${cand}=0" \
-            --tag "${cand}=cand"
+            --to-revisions "${live}=100,${cand}=0"
+        fi
+
+        echo "→ add tag cand to ${cand}"
+        gcloud run services update-traffic "${service}" --region "${region}" \
+          --add-tag "${cand}=cand"
+         
         else
           gcloud run services update-traffic "${service}" --region "${region}" \
             --add-tag "${cand}=cand"
