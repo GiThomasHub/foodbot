@@ -1,98 +1,117 @@
-options:
-  logging: CLOUD_LOGGING_ONLY
-  substitutionOption: ALLOW_LOOSE
-timeout: "1200s"
+# Cloud Build: Blue/Green mit tag-basiertem Health-Check und hartem 100%-Switch
+# Region/Service hart codiert (europe-west6 / foodbot). Keine freien substitutions.
+timeout: "1800s"  # 30 min Puffer
 
 steps:
-  - id: "Build image"
-    name: "gcr.io/cloud-builders/docker"
-    args: ["build","-t","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA","."]
+  # 1) Docker build & push nach Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    id: Build Image
+    args:
+      - "build"
+      - "-t"
+      - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+      - "."
+  - name: gcr.io/cloud-builders/docker
+    id: Push Image
+    args:
+      - "push"
+      - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
 
-  - id: "Push image"
-    name: "gcr.io/cloud-builders/docker"
-    args: ["push","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"]
-
-  - id: "Deploy (0% traffic)"
-    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+  # 2) Deploy nach Cloud Run mit 0% Traffic + TAG=cand (nur für Health-Check-Routing)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Deploy 0% + tag=cand
     entrypoint: bash
     args:
       - -ceu
       - |
-        set -eo pipefail
-        echo "🖼  image: europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+        set -o pipefail
+        REGION="europe-west6"
+        SERVICE="foodbot"
+        IMG="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
 
-        gcloud run deploy foodbot \
-          --region=europe-west6 \
-          --image="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA" \
+        echo "→ Deploy ${SERVICE} in ${REGION} mit Image ${IMG} (0% Traffic, tag=cand)"
+        gcloud run deploy "${SERVICE}" \
+          --region="${REGION}" \
+          --image="${IMG}" \
           --no-traffic \
-          --port=8080 \
-          --allow-unauthenticated \
-          --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+          --tag="cand" \
+          --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest \
+          --quiet
 
-        cand="$(gcloud run services describe foodbot --region europe-west6 --format='value(status.latestCreatedRevisionName)')"
-        echo "👤 candidate: ${cand}"
-        test -n "${cand}" && printf '%s' "${cand}" > /workspace/candidate.txt
+        CAND="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.latestCreatedRevisionName)')"
+        echo "🆕 Candidate-Revision: ${CAND}"
+        echo "CAND=${CAND}" > /workspace/_cand.env
 
-  - id: "Ready + Health + Traffic"
-    name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+  # 3) Warten bis Ready=True (Active ist dank Tag ≈ True) + Health-Check gegen cand-URL
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Ready + Health + Traffic
     entrypoint: bash
     args:
       - -ceu
       - |
-        set -euo pipefail
-        cand="$(cat /workspace/candidate.txt)"
-        echo "🔎 tracking candidate: ${cand}"
+        set -o pipefail
+        REGION="europe-west6"
+        SERVICE="foodbot"
+        source /workspace/_cand.env
+        echo "CAND: ${CAND}"
 
+        # Fehlerfalle: Bei Problemen Logs der Candidate-Revision ausgeben
         dump_logs() {
-          echo "📜 last logs for ${cand}:"
+          echo "== Recent logs for ${CAND} =="
           gcloud logging read \
-            "resource.type=cloud_run_revision AND resource.labels.service_name=foodbot AND resource.labels.revision_name=${cand}" \
-            --limit=200 --order=desc --format='value(textPayload)' || true
+            'resource.type="cloud_run_revision" AND resource.labels.service_name='"${SERVICE}"' AND resource.labels.revision_name='"${CAND}" \
+            --project="$PROJECT_ID" \
+            --limit=200 --format='value(textPayload)' || true
         }
-        trap 'echo "❌ error"; dump_logs' ERR
+        trap 'dump_logs' ERR
 
-        # Wartefenster ~8 Min, detecte auch parallele Deploys/Retire
+        # 3a) Ready-Poll (max ~8 Minuten)
         for i in $(seq 1 80); do
-          # 1) Wurde eine andere Revision erstellt? (Parallel-Deploy)
-          latest="$(gcloud run services describe foodbot --region europe-west6 --format='value(status.latestCreatedRevisionName)')"
-          if [[ -n "${latest}" && "${latest}" != "${cand}" ]]; then
-            echo "❌ Parallel-Deploy erkannt: latestCreatedRevisionName=${latest} (expected ${cand})"
-            exit 24
+          READY=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Ready].status)')
+          R_REASON=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Ready].reason)')
+          C_REASON=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=ContainerReady].reason)')
+          ACTIVE=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Active].status)')
+          A_REASON=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Active].reason)')
+
+          printf "  [%02d/80] Ready=%s (Reason=%s)  Active=%s (Reason=%s)\n" "$i" "${READY:-"-"}" "${R_REASON:-"-"}" "${ACTIVE:-"-"}" "${A_REASON:-"-"}"
+
+          # sofort failen, wenn HealthCheckContainerError signalisiert wird
+          if [[ "${R_REASON}" == "HealthCheckContainerError" || "${C_REASON}" == "HealthCheckContainerError" ]]; then
+            echo "❌ HealthCheckContainerError in Revision-Zustand – breche ab."
+            exit 21
           fi
 
-          # 2) Zustände der Kandidaten-Revision
-          ready="$(gcloud run revisions describe "${cand}" --region europe-west6 --format="value(status.conditions[?type=Ready].status)")"
-          reason_ready="$(gcloud run revisions describe "${cand}" --region europe-west6 --format="value(status.conditions[?type=Ready].reason)")"
-          active_status="$(gcloud run revisions describe "${cand}" --region europe-west6 --format="value(status.conditions[?type=Active].status)")"
-          active_reason="$(gcloud run revisions describe "${cand}" --region europe-west6 --format="value(status.conditions[?type=Active].reason)")"
+          # paralleler Deploy → Kandidat zurückgezogen
+          if [[ "${R_REASON}" == "Retired" || "${A_REASON}" == "Retired" ]]; then
+            echo "❌ Candidate wurde Retired (vermutlich paralleler Deploy)."
+            exit 21
+          fi
 
-          printf '  [%02d/80] Ready=%s (Reason=%s)  Active=%s (Reason=%s)\n' \
-            "$i" "${ready:-?}" "${reason_ready:--}" "${active_status:--}" "${active_reason:--}"
-
-          # 3) HealthCheckContainerError -> sofort abbrechen
-          [[ "${reason_ready:-}" == *HealthCheckContainerError* ]] && { echo "❌ HealthCheckContainerError"; exit 20; }
-
-          # 4) Retired -> klarer Abbruch (jemand hat überholt)
-          [[ "${active_reason:-}" == Retired ]] && { echo "❌ Revision retired (Parallel-Deploy)"; exit 25; }
-
-          # 5) Fertig?
-          [[ "${ready}" == "True" ]] && break
+          if [[ "${READY}" == "True" ]]; then
+            echo "✅ Ready=True"; break
+          fi
           sleep 6
         done
 
-        [[ "${ready:-}" == "True" ]] || { echo "❌ Ready nicht erreicht"; exit 21; }
+        if [[ "${READY}" != "True" ]]; then
+          echo "❌ Ready nicht erreicht"; exit 21
+        fi
 
-        rev_url="$(gcloud run revisions describe "${cand}" --region europe-west6 --format='value(status.url)')"
-        test -n "${rev_url}" || { echo "❌ keine Revision-URL"; exit 22; }
+        # 3b) Health-Check gegen TAG-URL (cand---<service-host>)
+        SERVICE_URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
+        HOST="${SERVICE_URL#https://}"
+        CAND_URL="https://cand---${HOST}"
+        echo "→ Health-Check: GET ${CAND_URL}/webhook/health"
+        CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "${CAND_URL%/}/webhook/health" || echo "000")
+        echo "HTTP ${CODE}"
+        if [[ "${CODE}" != "200" ]]; then
+          echo "❌ Health != 200 – kein Traffic-Shift."; exit 22
+        fi
 
-        echo "🩺 GET ${rev_url%/}/webhook/health"
-        code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${rev_url%/}/webhook/health" || true)"
-        echo "   → HTTP ${code}"
-        [[ "${code}" == "200" ]] || { echo "❌ Health != 200"; exit 23; }
-
-        echo "🔁 traffic → ${cand}=100"
-        gcloud run services update-traffic foodbot --region europe-west6 --to-revisions "${cand}=100"
-        echo "✅ done."
+        # 3c) Harte Umschaltung 100% auf Candidate
+        echo "→ Traffic umschalten auf ${CAND}=100%"
+        gcloud run services update-traffic "${SERVICE}" --region "${REGION}" --to-revisions "${CAND}=100" --quiet
+        echo "✅ Traffic 100% auf ${CAND}"
 
 images:
-  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+  - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
