@@ -1,98 +1,96 @@
-options:
-  logging: CLOUD_LOGGING_ONLY
-  substitutionOption: ALLOW_LOOSE
 timeout: "1800s"
 
 steps:
-  # 1) Build & Push
-  - id: build image
-    name: gcr.io/cloud-builders/docker
-    args: ["build","-t","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA","."]
+  # 1) Build
+  - name: gcr.io/cloud-builders/docker
+    id: Build Image
+    args: [
+      "build","-t","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA","."
+    ]
 
-  - id: push image
-    name: gcr.io/cloud-builders/docker
-    args: ["push","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"]
+  # 2) Push
+  - name: gcr.io/cloud-builders/docker
+    id: Push Image
+    args: [
+      "push","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+    ]
 
-  # 2) Deploy (0% Traffic) – kein Tagging
-  - id: deploy 0% (no-traffic)
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+  # 3) Deploy ohne Traffic (keine Tags)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Deploy 0%
+    args:
+      - run
+      - deploy
+      - foodbot
+      - --region=europe-west6
+      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+      - --no-traffic
+      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest
+      - --quiet
+
+  # 4) Ready-Polling (JSON), Health-Check, dann 100% Traffic
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Ready + Health + Traffic
     entrypoint: bash
     args:
       - -ceu
       - |
-        set -o pipefail
-        region="europe-west6"
-        service="foodbot"
-        img="europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
+        REGION="europe-west6"
+        SERVICE="foodbot"
 
-        echo "→ deploy ${service} in ${region} (no-traffic) image=${img}"
-        gcloud run deploy "${service}" \
-          --region="${region}" \
-          --image="${img}" \
-          --no-traffic \
-          --port=8080 \
-          --allow-unauthenticated \
-          --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest \
-          --quiet
+        CAND="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.latestCreatedRevisionName)')"
+        test -n "$CAND" || { echo "❌ Keine Kandidaten-Revision."; exit 10; }
+        echo "👤 Candidate: $CAND"
 
-        # neueste erzeugte Revision als Kandidat
-        cand="$(gcloud run services describe "${service}" --region "${region}" --format='value(status.latestCreatedRevisionName)')"
-        echo "candidate=${cand}"
-        test -n "${cand}" || { echo "❌ no candidate revision"; exit 10; }
-        printf '%s' "${cand}" > /workspace/cand.txt
-
-  # 3) Ready → Health (per REV-URL) → Traffic=100
-  - id: ready + health + traffic
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    entrypoint: bash
-    args:
-      - -ceu
-      - |
-        set -o pipefail
-        region="europe-west6"
-        service="foodbot"
-        cand="$(cat /workspace/cand.txt)"
-        echo "track candidate: ${cand}"
-
-        dump_logs() {
-          echo "== recent logs for ${cand} =="
-          gcloud logging read \
-            "resource.type=cloud_run_revision AND resource.labels.service_name=${service} AND resource.labels.revision_name=${cand}" \
-            --limit=200 --order=desc --format='value(textPayload)' || true
+        jget () {
+          python3 - "$1" << 'PY'
+  import sys, json
+  field = sys.argv[1]
+  d = json.load(sys.stdin)
+  conds = d.get("status", {}).get("conditions", [])
+  def val(t, k):
+      for c in conds:
+          if c.get("type")==t:
+              return c.get(k, "")
+      return ""
+  if field=="ready.status":  print(val("Ready","status"))
+  elif field=="ready.reason": print(val("Ready","reason"))
+  elif field=="active.status":print(val("Active","status"))
+  elif field=="url":          print(d.get("status",{}).get("url","") or d.get("status",{}).get("address",{}).get("url",""))
+  PY
         }
-        trap 'dump_logs' ERR
 
-        # JSON-Parsing via Python One-Liner
-        get_ready_status() {
-          python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((c.get("status","") for c in d.get("status",{}).get("conditions",[]) if c.get("type")=="Ready"), ""))'
-        }
-        # auf Ready warten (~8 Min) + Parallel-Deploy verhindern
+        echo "⏳ warte bis Ready…"
         for i in $(seq 1 80); do
-          latest="$(gcloud run services describe "${service}" --region "${region}" --format='value(status.latestCreatedRevisionName)')"
-          if [ -n "${latest}" ] && [ "${latest}" != "${cand}" ]; then
-            echo "❌ parallel deploy detected: latest=${latest} expected=${cand}"
-            exit 24
-          fi
-
-          js="$(gcloud run revisions describe "${cand}" --region "${region}" --format=json || true)"
-          ready="$(printf '%s' "${js}" | get_ready_status | tr -d '\r')"
-          printf '  [%02d/80] Ready=%s\n' "$i" "${ready:-?}"
-          [ "${ready}" = "True" ] && break
-          sleep 6
+          JSON="$(gcloud run revisions describe "$CAND" --region "$REGION" --format=json || true)"
+          READY="$(printf '%s' "$JSON" | jget ready.status | tr -d '\r')"
+          RREASON="$(printf '%s' "$JSON" | jget ready.reason | tr -d '\r')"
+          ACTIVE="$(printf '%s' "$JSON" | jget active.status | tr -d '\r')"
+          printf "  [%02d/80] Ready=%s Active=%s Reason=%s\n" "$i" "${READY:-?}" "${ACTIVE:-?}" "${RREASON:- -}"
+          [ "$READY" = "True" ] && break
+          sleep 2
         done
-        [ "${ready}" = "True" ] || { echo "❌ Ready not reached"; exit 21; }
 
-        # Revision-URL (ohne Tags) ermitteln und Health prüfen
-        rev_url="$(gcloud run revisions describe "${cand}" --region "${region}" --format='value(status.url,status.address.url)' | tr ' ' '\n' | head -n1)"
-        test -n "${rev_url}" || { echo "❌ no revision URL"; exit 23; }
-        echo "🩺 GET ${rev_url%/}/webhook/health"
-        code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 "${rev_url%/}/webhook/health" || echo 000)"
-        echo "→ HTTP ${code}"
-        [ "${code}" = "200" ] || { echo "❌ health != 200"; exit 22; }
+        [ "$READY" = "True" ] || { 
+          echo "📜 Letzte Logs für $CAND:"
+          gcloud logging read \
+            "resource.type=cloud_run_revision AND resource.labels.service_name=$SERVICE AND resource.labels.revision_name=$CAND" \
+            --limit=100 --freshness=30m --format="value(textPayload)" || true
+          echo "❌ Ready not reached"; exit 21; 
+        }
 
-        echo "🔁 traffic → ${cand}=100"
-        gcloud run services update-traffic "${service}" --region "${region}" --to-revisions "${cand}=100"
-        echo "✅ Traffic 100% auf ${cand}"
+        REV_URL="$(printf '%s' "$JSON" | jget url)"
+        test -n "$REV_URL" || { echo "❌ Keine Revision-URL."; exit 23; }
+        echo "🌐 Revision-URL: $REV_URL"
+
+        echo "🩺 Health (Kandidat): GET ${REV_URL%/}/webhook/health"
+        CODE_CAND="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${REV_URL%/}/webhook/health" || true)"
+        echo "   → HTTP $CODE_CAND"
+        [ "$CODE_CAND" = "200" ] || { echo "❌ Health-Check fehlgeschlagen."; exit 24; }
+
+        echo "🔁 Traffic → $CAND (100%) ..."
+        gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-revisions "$CAND=100"
+        echo "🎉 Fertig – 100% Traffic auf $CAND"
 
 images:
-  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA
+  - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
