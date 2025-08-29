@@ -42,76 +42,98 @@ steps:
         echo "🆕 Candidate-Revision: ${CAND}"
         echo "CAND=${CAND}" > /workspace/_cand.env
 
-  # 3) Warten bis Ready=True (Active ist dank Tag ≈ True) + Health-Check gegen cand-URL
+  # --- Step 2: Ready + Health + Traffic (robust) ---
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    id: Ready + Health + Traffic
+    id: "Ready + Health + Traffic"
     entrypoint: bash
     args:
       - -ceu
       - |
-        set -o pipefail
-        REGION="europe-west6"
-        SERVICE="foodbot"
-        source /workspace/_cand.env
-        echo "CAND: ${CAND}"
+        PROJECT_ID="${PROJECT_ID:?}"
+        REGION="${REGION:?}"
+        SERVICE="${SERVICE:?}"
+        COMMIT_SHA="${COMMIT_SHA:?}"
 
-        # Fehlerfalle: Bei Problemen Logs der Candidate-Revision ausgeben
-        dump_logs() {
-          echo "== Recent logs for ${CAND} =="
-          gcloud logging read \
-            'resource.type="cloud_run_revision" AND resource.labels.service_name='"${SERVICE}"' AND resource.labels.revision_name='"${CAND}" \
-            --project="$PROJECT_ID" \
-            --limit=200 --format='value(textPayload)' || true
+        IMAGE="europe-west6-docker.pkg.dev/${PROJECT_ID}/foodbot/foodbot:${COMMIT_SHA}"
+        echo "🖼  Image: ${IMAGE}"
+        echo "🚀 Deploy ${SERVICE} in ${REGION} (0% traffic)..."
+
+        gcloud run deploy "${SERVICE}" \
+          --region="${REGION}" \
+          --image="${IMAGE}" \
+          --no-traffic \
+          --quiet
+
+        # Kandidatenrevision (neueste erzeugte)
+        CAND="$(gcloud run revisions list \
+          --service="${SERVICE}" --region="${REGION}" \
+          --format="value(metadata.name)" \
+          --sort-by="~metadata.creationTimestamp" --limit=1)"
+        test -n "${CAND}" || { echo "❌ Konnte Kandidaten-Revision nicht ermitteln."; exit 10; }
+        echo "👤 Candidate: ${CAND}" | tee /workspace/candidate.txt
+
+        # kleine Helper-Funktion: Feld robust aus JSON ziehen
+        jget () {
+          python3 - "$1" << 'PY'
+  import sys, json
+  field = sys.argv[1]
+  d = json.load(sys.stdin)
+  conds = d.get("status", {}).get("conditions", [])
+  def val(t, k):
+      for c in conds:
+          if c.get("type")==t:
+              return c.get(k, "")
+      return ""
+  if field=="ready.status":  print(val("Ready","status"))
+  elif field=="ready.reason": print(val("Ready","reason"))
+  elif field=="ready.msg":    print(val("Ready","message"))
+  elif field=="active.status":print(val("Active","status"))
+  elif field=="url":          print(d.get("status",{}).get("url","") or d.get("status",{}).get("address",{}).get("url",""))
+  PY
         }
-        trap 'dump_logs' ERR
 
-        # 3a) Ready-Poll (max ~8 Minuten)
+        echo "⏳ warte bis Ready…"
         for i in $(seq 1 80); do
-          READY=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Ready].status)')
-          R_REASON=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Ready].reason)')
-          C_REASON=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=ContainerReady].reason)')
-          ACTIVE=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Active].status)')
-          A_REASON=$(gcloud run revisions describe "${CAND}" --region "${REGION}" --format='value(status.conditions[?type=Active].reason)')
+          JSON="$(gcloud run revisions describe "${CAND}" --region="${REGION}" --format=json || true)"
+          READY="$(printf '%s' "$JSON" | jget ready.status | tr -d '\r')"
+          ACTIVE="$(printf '%s' "$JSON" | jget active.status | tr -d '\r')"
+          RREASON="$(printf '%s' "$JSON" | jget ready.reason | tr -d '\r')"
+          printf "  [%02d/80] Ready=%s  AReason=%s  RReason=%s\n" "$i" "${READY:-?}" "${ACTIVE:-?}" "${RREASON:- -}"
 
-          printf "  [%02d/80] Ready=%s (Reason=%s)  Active=%s (Reason=%s)\n" "$i" "${READY:-"-"}" "${R_REASON:-"-"}" "${ACTIVE:-"-"}" "${A_REASON:-"-"}"
-
-          # sofort failen, wenn HealthCheckContainerError signalisiert wird
-          if [[ "${R_REASON}" == "HealthCheckContainerError" || "${C_REASON}" == "HealthCheckContainerError" ]]; then
-            echo "❌ HealthCheckContainerError in Revision-Zustand – breche ab."
-            exit 21
+          if [ "${READY}" = "True" ]; then
+            break
           fi
-
-          # paralleler Deploy → Kandidat zurückgezogen
-          if [[ "${R_REASON}" == "Retired" || "${A_REASON}" == "Retired" ]]; then
-            echo "❌ Candidate wurde Retired (vermutlich paralleler Deploy)."
-            exit 21
-          fi
-
-          if [[ "${READY}" == "True" ]]; then
-            echo "✅ Ready=True"; break
-          fi
-          sleep 6
+          sleep 2
         done
 
-        if [[ "${READY}" != "True" ]]; then
-          echo "❌ Ready nicht erreicht"; exit 21
+        if [ "${READY}" != "True" ]; then
+          echo "📜 Letzte Logs für ${CAND}:"
+          gcloud logging read \
+            "resource.type=cloud_run_revision AND resource.labels.service_name=${SERVICE} AND resource.labels.revision_name=${CAND}" \
+            --limit=100 --freshness=30m --format="value(textPayload)"
+          echo "❌ Ready not reached"; exit 21
         fi
 
-        # 3b) Health-Check gegen TAG-URL (cand---<service-host>)
-        SERVICE_URL="$(gcloud run services describe "${SERVICE}" --region "${REGION}" --format='value(status.url)')"
-        HOST="${SERVICE_URL#https://}"
-        CAND_URL="https://cand---${HOST}"
-        echo "→ Health-Check: GET ${CAND_URL}/webhook/health"
-        CODE=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 15 "${CAND_URL%/}/webhook/health" || echo "000")
-        echo "HTTP ${CODE}"
-        if [[ "${CODE}" != "200" ]]; then
-          echo "❌ Health != 200 – kein Traffic-Shift."; exit 22
+        REV_URL="$(printf '%s' "$JSON" | jget url)"
+        test -n "${REV_URL}" || { echo "❌ Keine Revision-URL ermittelt."; exit 23; }
+        echo "🌐 Revision-URL: ${REV_URL}"
+
+        echo "🩺 Health (Kandidat): GET ${REV_URL%/}/webhook/health"
+        CODE_CAND="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${REV_URL%/}/webhook/health" || true)"
+        echo "   → HTTP ${CODE_CAND}"
+        [ "${CODE_CAND}" = "200" ] || { echo "❌ Health-Check fehlgeschlagen."; exit 24; }
+
+        # optional: Live-Health nur informativ
+        SVC_URL="$(gcloud run services describe "${SERVICE}" --region="${REGION}" --format='value(status.url)' || true)"
+        if [ -n "${SVC_URL}" ]; then
+          CODE_LIVE="$(curl -sS -m 10 -o /dev/null -w '%{http_code}' "${SVC_URL%/}/webhook/health" || true)"
+          echo "ℹ️  Live-Service Health: ${CODE_LIVE:-N/A}"
         fi
 
-        # 3c) Harte Umschaltung 100% auf Candidate
-        echo "→ Traffic umschalten auf ${CAND}=100%"
-        gcloud run services update-traffic "${SERVICE}" --region "${REGION}" --to-revisions "${CAND}=100" --quiet
-        echo "✅ Traffic 100% auf ${CAND}"
+        echo "🔁 Traffic → ${CAND} (100%) ..."
+        gcloud run services update-traffic "${SERVICE}" --region="${REGION}" --to-revisions "${CAND}=100"
+        echo "🎉 Fertig – 100% Traffic auf ${CAND}"
+
 
 images:
   - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
