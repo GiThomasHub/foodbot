@@ -4064,7 +4064,11 @@ def main():
 
         async def _on_startup(_app):
             await app.initialize()
-            await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+            try:
+                await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+                print("✅ set_webhook OK")
+            except Exception as e:
+                print(f"⚠️ set_webhook failed: {e} — continuing without blocking startup")
             await app.start()
 
         async def _on_cleanup(_app):
@@ -4086,7 +4090,11 @@ def main():
 
         async def _on_startup(_app):
             await app.initialize()
-            await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+            try:
+                await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
+                print("✅ set_webhook OK")
+            except Exception as e:
+                print(f"⚠️ set_webhook failed: {e} — continuing without blocking startup")
             await app.start()
 
         async def _on_cleanup(_app):
