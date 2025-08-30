@@ -57,7 +57,8 @@ steps:
     args:
       - "-c"
       - >
-        set -euo pipefail;
+        set -eo pipefail;  # <-- kein -u
+        i=0;
         region=europe-west6; service=foodbot; cand="$(cat /workspace/cand.txt)";
         echo "track candidate: $cand";
         # Ready-Polling robust aus JSON:
@@ -68,7 +69,11 @@ steps:
           [ "$ready" = "True" ] && break;
           sleep 6;
         done;
-        [ "$ready" = "True" ] || { echo "📜 recent logs for $cand:"; gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=$service AND resource.labels.revision_name=$cand" --limit=150 --order=desc --format='value(textPayload)' || true; echo "❌ Ready not reached"; exit 21; };
+        [ "$ready" = "True" ] || {
+          echo "📜 recent logs for $cand:";
+          gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=$service AND resource.labels.revision_name=$cand" --limit=150 --order=desc --format='value(textPayload)' || true;
+          echo "❌ Ready not reached"; exit 21;
+        };
         rev_url="$(gcloud run revisions describe "$cand" --region "$region" --format='value(status.url,status.address.url)' | tr ' ' '\n' | head -n1)";
         test -n "$rev_url" || { echo "❌ no revision url"; exit 23; };
         echo "🩺 GET ${rev_url%/}/webhook/health";
