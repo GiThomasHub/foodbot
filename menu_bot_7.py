@@ -55,7 +55,11 @@ logging.getLogger("fpdf.output").setLevel(logging.ERROR)
 logging.getLogger("fontTools").setLevel(logging.ERROR)
 logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
 
+import httpx
 
+HTTPX_TIMEOUT = httpx.Timeout(10.0, connect=3.0)  # 3s Connect, 10s gesamt
+HTTPX_LIMITS  = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+HTTPX_CLIENT  = httpx.AsyncClient(timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS, follow_redirects=False)
 
 
 MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SHOW_LIST, FERTIG_PERSONEN, REZEPT_INDEX, REZEPT_PERSONEN, TAUSCHE_SELECT, TAUSCHE_CONFIRM, ASK_CONFIRM, EXPORT_OPTIONS, FAV_OVERVIEW, FAV_DELETE_SELECT, PDF_EXPORT_CHOICE, FAV_ADD_SELECT, RESTART_CONFIRM, PROFILE_CHOICE, PROFILE_NEW_A, PROFILE_NEW_B, PROFILE_NEW_C, PROFILE_OVERVIEW, QUICKONE_START, QUICKONE_CONFIRM, PERSONS_SELECTION, PERSONS_MANUAL, MENU_COUNT, MENU_AUFWAND = range(29)
@@ -95,6 +99,10 @@ def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
     async def _on_cleanup(_):
         await app.stop()
         await app.shutdown()
+        try:
+            await HTTPX_CLIENT.aclose()
+        except Exception:
+            pass
 
     aio.on_startup.append(_on_startup)
     aio.on_cleanup.append(_on_cleanup)
@@ -130,7 +138,7 @@ SHEET_ZUTATEN = os.getenv("SHEET_ZUTATEN", "Zutaten")
 
 
 # Instantiate OpenAI client (new SDK)
-openai_client = OpenAI(api_key=OPENAI_KEY)
+openai_client = OpenAI(api_key=OPENAI_KEY, timeout=20, max_retries=1)
 
 scope = [
     "https://spreadsheets.google.com/feeds",
@@ -2973,21 +2981,21 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            gist_resp = await client.post(
-                "https://api.github.com/gists",
-                json=gist_payload,
-                headers=headers,
-            )
-            gist_resp.raise_for_status()
-            raw_url = gist_resp.json()["files"]["recipe.html"]["raw_url"]
+        gist_resp = await HTTPX_CLIENT.post(
+            "https://api.github.com/gists",
+            json=gist_payload,
+            headers=headers,
+        )
+        gist_resp.raise_for_status()
+        raw_url = gist_resp.json()["files"]["recipe.html"]["raw_url"]
 
-            # --- 3) Deeplink von Bring holen --------------------------------
-            dl_resp = await client.get(
-                "https://api.getbring.com/rest/bringrecipes/deeplink",
-                params={"url": raw_url, "source": "web"},
-                follow_redirects=False,
-            )
+        # --- 3) Deeplink von Bring holen --------------------------------
+        dl_resp = await HTTPX_CLIENT.get(
+            "https://api.getbring.com/rest/bringrecipes/deeplink",
+            params={"url": raw_url, "source": "web"},
+            follow_redirects=False,
+        )
+
 
         if dl_resp.status_code in (301, 302, 303, 307, 308):
             deeplink = dl_resp.headers.get("location")
@@ -4112,6 +4120,10 @@ def main():
         async def _on_cleanup(_app):
             await app.stop()
             await app.shutdown()
+            try:
+                await HTTPX_CLIENT.aclose()
+            except Exception:
+                pass
 
         aio.on_startup.append(_on_startup)
         aio.on_cleanup.append(_on_cleanup)
@@ -4138,7 +4150,11 @@ def main():
         async def _on_cleanup(_app):
             await app.stop()
             await app.shutdown()
-
+            try:
+                await HTTPX_CLIENT.aclose()
+            except Exception:
+                pass
+                
         aio.on_startup.append(_on_startup)
         aio.on_cleanup.append(_on_cleanup)
         web.run_app(aio, host="0.0.0.0", port=port)
