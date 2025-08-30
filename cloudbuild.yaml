@@ -1,5 +1,7 @@
 timeout: "1800s"
-
+options:
+  logging: CLOUD_LOGGING_ONLY
+  
 steps:
   # 1) Build
   - name: gcr.io/cloud-builders/docker
