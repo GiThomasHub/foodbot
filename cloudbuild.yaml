@@ -22,6 +22,7 @@ steps:
       "--region=europe-west6",
       "--image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
       "--no-traffic",
+      "--tag=cand",
       "--port=8080",
       "--allow-unauthenticated",
       "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest",
@@ -85,19 +86,19 @@ steps:
           echo "❌ Ready not reached"; exit 21
         fi
 
-        # Revision-URL (routbar, weil Step 4 vorher 0%-Split gesetzt hat)
-        rev_url="$(gcloud run revisions describe "$cand" --region=europe-west6 --format='value(status.url,status.address.url)' | tr ' ' '\n' | head -n1)"
-        if [ -z "$rev_url" ]; then
-          echo "❌ no revision url"; exit 23
-        fi
-        echo "🌐 Revision-URL: $rev_url"
+        # (NEU) Health per Tag-URL cand
+        svc_url="$(gcloud run services describe "$service" --region=europe-west6 --format='value(status.url)')"
+        host="${svc_url#https://}"
+        cand_url="https://cand---${host}"
+        echo "🌐 Candidate-URL: $cand_url"
 
-        echo "🩺 GET ${rev_url%/}/webhook/health"
-        code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${rev_url%/}/webhook/health" || echo 000)"
+        echo "🩺 GET ${cand_url%/}/webhook/health"
+        code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${cand_url%/}/webhook/health" || echo 000)"
         echo "→ HTTP $code"
         if [ "$code" != "200" ]; then
           echo "❌ health != 200"; exit 22
         fi
+
 
         echo "🔁 traffic → $cand=100"
         gcloud run services update-traffic "$service" --region=europe-west6 --to-revisions "$cand=100"
