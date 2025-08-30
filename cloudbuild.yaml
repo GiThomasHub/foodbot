@@ -23,6 +23,13 @@ steps:
       "--image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
       "--no-traffic",
       "--tag=cand",
+
+      "--concurrency=10",
+      "--cpu=1",
+      "--memory=1Gi",
+      "--min-instances=1",
+      "--cpu-boost",
+      
       "--port=8080",
       "--allow-unauthenticated",
       "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest",
