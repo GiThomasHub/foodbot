@@ -16,6 +16,7 @@ steps:
   # 3) Deploy ohne Traffic (keine Tags)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Deploy 0%
+    entrypoint: gcloud
     args: [
       "run","deploy","foodbot",
       "--region=europe-west6",
