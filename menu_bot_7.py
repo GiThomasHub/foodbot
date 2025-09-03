@@ -29,6 +29,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram
 from telegram.constants import ChatAction, ParseMode
 from telegram.helpers import escape_markdown
+from persistence import user_key, get_profile as store_get_profile, set_profile as store_set_profile
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -359,6 +360,25 @@ def load_profiles() -> dict:
 def save_profiles() -> None:
     """Speichert das globale profiles-Dict in die JSON-Datei."""
     save_json(PROFILES_FILE, profiles)
+
+def ensure_profile_loaded(uid_str: str) -> bool:
+    """
+    Stellt sicher, dass ein Profil für uid_str im lokalen Dict 'profiles' liegt.
+    Falls nicht vorhanden, wird es aus dem Persistenz-Layer (JSON/Firestore)
+    nachgeladen und in 'profiles' zwischengespeichert.
+    Rückgabe: True, wenn Profil vorhanden (nach dem Schritt), sonst False.
+    """
+    if uid_str in profiles and isinstance(profiles[uid_str], dict):
+        return True
+    try:
+        ukey = user_key(int(uid_str))
+    except Exception:
+        return False
+    data = store_get_profile(ukey)
+    if data:
+        profiles[uid_str] = data
+        return True
+    return False
 
 
 async def cleanup_prof_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -925,7 +945,7 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== 1)  Bestehendes Profil =========================================
     if choice == "prof_exist":
-        if uid in profiles:
+        if ensure_profile_loaded(uid):
             # Profil vorhanden → Wizard-Messages weg, sofort zum alten Flow
             await cleanup_prof_loop(context, q.message.chat_id)
             return await start_menu_count_flow(update, context)
@@ -958,7 +978,7 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== 4)  Mein Profil =================================================
     if choice == "prof_show":
-        if uid in profiles:
+        if ensure_profile_loaded(uid):
             await send_and_log(
                 profile_overview_text(profiles[uid]),
                 reply_markup=build_profile_overview_keyboard(),
@@ -1053,7 +1073,9 @@ async def profile_new_c_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "styles":      list(context.user_data["new_profile"]["styles"]),
         "weight":      context.user_data["new_profile"]["weight"],
     }
-    save_profiles()
+    # Persistentes Speichern (JSON oder Firestore – je nach PERSISTENCE)
+    store_set_profile(user_key(int(uid)), profiles[uid])
+
 
     # Übersicht + Buttons
     await q.message.edit_text(
