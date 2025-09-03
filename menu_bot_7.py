@@ -29,7 +29,11 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram
 from telegram.constants import ChatAction, ParseMode
 from telegram.helpers import escape_markdown
-from persistence import user_key, get_profile as store_get_profile, set_profile as store_set_profile
+from persistence import (
+    user_key,
+    get_profile as store_get_profile, set_profile as store_set_profile,
+    get_favorites as store_get_favorites, set_favorites as store_set_favorites,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -379,6 +383,21 @@ def ensure_profile_loaded(uid_str: str) -> bool:
         profiles[uid_str] = data
         return True
     return False
+
+def ensure_favorites_loaded(uid_str: str) -> None:
+    """
+    Stellt sicher, dass favorites[uid_str] eine Liste ist.
+    Lädt sie bei Bedarf aus dem Persistenz-Layer (JSON/Firestore).
+    """
+    if uid_str in favorites and isinstance(favorites[uid_str], list):
+        return
+    try:
+        ukey = user_key(int(uid_str))
+        favorites[uid_str] = store_get_favorites(ukey)
+        if not isinstance(favorites[uid_str], list):
+            favorites[uid_str] = []
+    except Exception:
+        favorites.setdefault(uid_str, [])
 
 
 async def cleanup_prof_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -3356,8 +3375,9 @@ async def favorit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menues = sessions[user_id]["menues"]
     if 0<=idx<len(menues):
         fav = menues[idx]
+        ensure_favorites_loaded(user_id)
         favorites.setdefault(user_id, []).append(fav)
-        save_json(FAVORITES_FILE, favorites)
+        store_set_favorites(user_key(int(user_id)), favorites[user_id])
         await update.message.reply_text(f"❤️ '{fav}' als Favorit gespeichert.")
     else:
         await update.message.reply_text("❌ Ungültiger Index.")
@@ -3368,6 +3388,7 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry-Point für /meinefavoriten oder Button „Favoriten“."""
     msg = update.message or update.callback_query.message
     user_id = str(update.effective_user.id)
+    ensure_favorites_loaded(user_id)
     favs = favorites.get(user_id, [])
     # IDs aller Loop-Nachrichten sammeln
     context.user_data["fav_msgs"] = []
@@ -3439,6 +3460,7 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     q = update.callback_query
     await q.answer()
     uid = str(q.from_user.id)
+    ensure_favorites_loaded(uid)
     msg = q.message
 
     if q.data == "fav_action_back":
@@ -3631,6 +3653,7 @@ async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
     uid = str(q.from_user.id)
     sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
+    ensure_favorites_loaded(uid)
     favs = favorites.get(uid, [])
 
     # Favoriten löschen
@@ -3638,7 +3661,7 @@ async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if 1 <= idx <= len(favs):
             favs.pop(idx - 1)
     favorites[uid] = favs
-    save_json(FAVORITES_FILE, favorites)
+    store_set_favorites(user_key(int(uid)), favorites[uid])
 
     # alle bisherigen Loop-Nachrichten löschen
     msg = q.message
@@ -3736,6 +3759,7 @@ async def fav_add_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(q.from_user.id)
 
     # In Favoriten speichern
+    ensure_favorites_loaded(user_id)
     favs = favorites.get(user_id, [])
     for i in sel:
         if 1 <= i <= len(dishes):
@@ -3743,7 +3767,7 @@ async def fav_add_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if dish not in favs:
                 favs.append(dish)
     favorites[user_id] = favs
-    save_json(FAVORITES_FILE, favorites)
+    store_set_favorites(user_key(int(user_id)), favorites[user_id])
 
     # Alle Loop-Messages löschen
     msg = q.message
@@ -3773,13 +3797,14 @@ async def fav_add_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
+    ensure_favorites_loaded(user_id)
     favs = favorites.get(user_id, [])
     if not context.args or not context.args[0].isdigit():
         return await update.message.reply_text("❌ Nutzung: /delete 1")
     idx = int(context.args[0]) - 1
     if 0<=idx<len(favs):
         rem = favs.pop(idx)
-        save_json(FAVORITES_FILE, favorites)
+        store_set_favorites(user_key(int(user_id)), favorites[user_id])
         await update.message.reply_text(f"🗑 Favorit '{rem}' gelöscht.")
     else:
         await update.message.reply_text("❌ Ungültiger Index.")
