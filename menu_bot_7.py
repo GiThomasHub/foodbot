@@ -1328,7 +1328,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "menues": final_gerichte,
                 "aufwand": final_aufwand,
             }
-            save_json(SESSIONS_FILE, sessions)
+            persist_session_for_chat(str(update.effective_chat.id))
 
 
             if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
@@ -1480,7 +1480,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ---------- Speichern & Ausgabe -------------------------------
         sessions[user_id] = {"menues": ausgewaehlt, "aufwand": aufwand_liste}
-        save_json(SESSIONS_FILE, sessions)
+        persist_session_for_chat(str(update.effective_chat.id))
 
         if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
             # Extrahiere Zusatzinfos zu den gewählten Gerichten
@@ -1787,7 +1787,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "aufwand": [0],
         "beilagen": {dish: side_nums}
     }
-    save_json(SESSIONS_FILE, sessions)
+    persist_session_for_chat(uid)
 
     # 7) Gericht anzeigen
     text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
@@ -1885,7 +1885,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Session aktualisieren
         sessions[uid]["beilagen"][dish] = side_nums
-        save_json(SESSIONS_FILE, sessions)
+        persist_session_for_chat(uid)
         sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
 
         # Gericht erneut anzeigen
@@ -2423,9 +2423,9 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             swap_history[current_aufw].append(neu)
 
+    persist_session_for_chat(user_id)
 
-    save_json(SESSIONS_FILE, sessions)
-
+    
     if show_debug_for(update):
         # gewählte Gerichte holen
         gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(menues)]
@@ -2666,7 +2666,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         # Änderungen speichern
-        save_json(SESSIONS_FILE, sessions)
+        persist_session_for_chat(uid)
         context.user_data["swapped_indices"] = swapped_slots
 
         if show_debug_for(update):
@@ -3864,10 +3864,13 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #    del profiles[uid]
     #    save_profiles()
 
-    # 2) Offene Menü-Session löschen
+    # 2) Offene Menü-Session löschen (lokal + Persistenz)
     if uid in sessions:
         del sessions[uid]
-        save_json(SESSIONS_FILE, sessions)
+    try:
+        store_delete_session(chat_key(int(uid)))
+    except Exception:
+        pass
 
     # 3) Wizard-Nachrichten aufräumen (falls gerade ein Loop offen war)
     await cleanup_prof_loop(context, update.effective_chat.id)
