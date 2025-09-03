@@ -33,6 +33,9 @@ from persistence import (
     user_key,
     get_profile as store_get_profile, set_profile as store_set_profile,
     get_favorites as store_get_favorites, set_favorites as store_set_favorites,
+    # Neu für Sessions (pro Chat):
+    chat_key,
+    get_session as store_get_session, set_session as store_set_session, delete_session as store_delete_session,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -398,6 +401,32 @@ def ensure_favorites_loaded(uid_str: str) -> None:
             favorites[uid_str] = []
     except Exception:
         favorites.setdefault(uid_str, [])
+
+def ensure_session_loaded_for_chat(cid_str: str) -> None:
+    """
+    Stellt sicher, dass sessions[cid_str] ein Dict ist.
+    Lädt es bei Bedarf aus dem Persistenz-Layer (JSON/Firestore).
+    """
+    if cid_str in sessions and isinstance(sessions[cid_str], dict):
+        return
+    try:
+        ckey = chat_key(int(cid_str))
+        data = store_get_session(ckey)
+        sessions[cid_str] = data if isinstance(data, dict) else {}
+    except Exception:
+        sessions.setdefault(cid_str, {})
+
+def persist_session_for_chat(cid_str: str) -> None:
+    """
+    Schreibt die aktuelle Chat-Session in die Persistenz (JSON/Firestore).
+    Erwartet, dass sessions[cid_str] existiert.
+    """
+    try:
+        ckey = chat_key(int(cid_str))
+        store_set_session(ckey, sessions.get(cid_str, {}))
+    except Exception:
+        # Kein Crash im Bot – nur loggen, wenn ihr Logging habt.
+        pass
 
 
 async def cleanup_prof_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
