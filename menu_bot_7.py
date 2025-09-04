@@ -399,20 +399,6 @@ def ensure_favorites_loaded(uid_str: str) -> None:
     except Exception:
         favorites.setdefault(uid_str, [])
 
-def ensure_session_loaded_for_chat(cid_str: str) -> None:
-    """
-    Stellt sicher, dass sessions[cid_str] ein Dict ist.
-    Lädt es bei Bedarf aus dem Persistenz-Layer (JSON/Firestore).
-    """
-    if cid_str in sessions and isinstance(sessions[cid_str], dict):
-        return
-    try:
-        ckey = chat_key(int(cid_str))
-        data = store_get_session(ckey)
-        sessions[cid_str] = data if isinstance(data, dict) else {}
-    except Exception:
-        sessions.setdefault(cid_str, {})
-
 def ensure_session_loaded_for_user_and_chat(update: Update) -> tuple[str, str]:
     """
     Lädt (falls nötig) die Chat-Session aus der Persistenz (Key = chat_id)
