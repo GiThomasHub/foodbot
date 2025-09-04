@@ -3664,7 +3664,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if removed:
         favorites[uid] = favs
-        save_favorites()
+        store_set_favorites(user_key(int(uid)), favorites[uid])
         msg_del = await q.message.reply_text(f"🗑️ {len(removed)} Favoriten entfernt.")
         await asyncio.sleep(1)
         try:
