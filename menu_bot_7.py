@@ -3868,7 +3868,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in sessions:
         del sessions[uid]
     try:
-    store_delete_session(chat_key(int(update.effective_chat.id)))
+        store_delete_session(chat_key(int(update.effective_chat.id)))
     except Exception:
         pass
 
