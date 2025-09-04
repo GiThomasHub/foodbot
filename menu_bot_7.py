@@ -232,9 +232,6 @@ def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def save_favorites():
-    with open(FAV_FILE, "w", encoding="utf-8") as f:
-        json.dump(favorites, f, indent=2, ensure_ascii=False)
 
 def load_favorites() -> dict:
     """Favoriten aus Datei laden (oder leeres Dict, wenn Datei fehlt)"""
@@ -416,17 +413,6 @@ def ensure_session_loaded_for_chat(cid_str: str) -> None:
     except Exception:
         sessions.setdefault(cid_str, {})
 
-def persist_session_for_chat(cid_str: str) -> None:
-    """
-    Schreibt die aktuelle Chat-Session in die Persistenz (JSON/Firestore).
-    Erwartet, dass sessions[cid_str] existiert.
-    """
-    try:
-        ckey = chat_key(int(cid_str))
-        store_set_session(ckey, sessions.get(cid_str, {}))
-    except Exception:
-        # Kein Crash im Bot – nur loggen, wenn ihr Logging habt.
-        pass
 def ensure_session_loaded_for_user_and_chat(update: Update) -> tuple[str, str]:
     """
     Lädt (falls nötig) die Chat-Session aus der Persistenz (Key = chat_id)
