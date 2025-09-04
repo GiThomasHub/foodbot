@@ -1787,7 +1787,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "aufwand": [0],
         "beilagen": {dish: side_nums}
     }
-    persist_session_for_chat(uid)
+    persist_session_for_chat(str(chat_id))
 
     # 7) Gericht anzeigen
     text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
@@ -1885,7 +1885,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Session aktualisieren
         sessions[uid]["beilagen"][dish] = side_nums
-        persist_session_for_chat(uid)
+        persist_session_for_chat(str(chat_id))
         sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
 
         # Gericht erneut anzeigen
@@ -2423,7 +2423,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             swap_history[current_aufw].append(neu)
 
-    persist_session_for_chat(user_id)
+    persist_session_for_chat(str(update.effective_chat.id))
 
     
     if show_debug_for(update):
@@ -2666,7 +2666,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         # Änderungen speichern
-        persist_session_for_chat(uid)
+        persist_session_for_chat(str(update.effective_chat.id))
         context.user_data["swapped_indices"] = swapped_slots
 
         if show_debug_for(update):
@@ -3868,7 +3868,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in sessions:
         del sessions[uid]
     try:
-        store_delete_session(chat_key(int(uid)))
+    store_delete_session(chat_key(int(update.effective_chat.id)))
     except Exception:
         pass
 
