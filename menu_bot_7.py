@@ -427,6 +427,45 @@ def persist_session_for_chat(cid_str: str) -> None:
     except Exception:
         # Kein Crash im Bot – nur loggen, wenn ihr Logging habt.
         pass
+def ensure_session_loaded_for_user_and_chat(update: Update) -> tuple[str, str]:
+    """
+    Lädt (falls nötig) die Chat-Session aus der Persistenz (Key = chat_id)
+    und legt sie in-memory unter sessions[uid] ab (Key = user_id).
+    Rückgabe: (uid_str, cid_str)
+    """
+    uid = str(update.effective_user.id)
+    cid = str(update.effective_chat.id)
+
+    # Falls already vorhanden & nicht leer → fertig
+    if uid in sessions and isinstance(sessions[uid], dict) and sessions[uid]:
+        return uid, cid
+
+    # Aus Store pro Chat laden → unter uid ablegen
+    try:
+        ckey = chat_key(int(cid))
+        data = store_get_session(ckey)
+        sessions[uid] = data if isinstance(data, dict) else {}
+    except Exception:
+        sessions.setdefault(uid, {})
+
+    return uid, cid
+
+
+def persist_session(update: Update) -> None:
+    """
+    Persistiert die aktuelle Session (Key = user_id in-memory) unter dem
+    Chat-Schlüssel (Key = chat_id) im Store.
+    """
+    uid = str(update.effective_user.id)
+    cid = str(update.effective_chat.id)
+    try:
+        ckey = chat_key(int(cid))
+        store_set_session(ckey, sessions.get(uid, {}))
+    except Exception:
+        # bewusst keine harten Fehler im Bot
+        pass
+
+
 
 
 async def cleanup_prof_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -1328,7 +1367,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "menues": final_gerichte,
                 "aufwand": final_aufwand,
             }
-            persist_session_for_chat(str(update.effective_chat.id))
+            persist_session(update)
 
 
             if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
@@ -1480,7 +1519,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ---------- Speichern & Ausgabe -------------------------------
         sessions[user_id] = {"menues": ausgewaehlt, "aufwand": aufwand_liste}
-        persist_session_for_chat(str(update.effective_chat.id))
+        persist_session(update)
 
         if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
             # Extrahiere Zusatzinfos zu den gewählten Gerichten
@@ -1565,6 +1604,7 @@ async def menu_input_direct(user_input: str, update: Update, context: ContextTyp
 
 # ─────────── menu_confirm_cb ───────────
 async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    ensure_session_loaded_for_user_and_chat(update)
     query = update.callback_query
     await query.answer()
     chat_id = query.message.chat.id
@@ -1708,6 +1748,7 @@ async def persons_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─────────── quickone_start ───────────
 async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
 
@@ -1787,7 +1828,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "aufwand": [0],
         "beilagen": {dish: side_nums}
     }
-    persist_session_for_chat(str(chat_id))
+    persist_session(update)
 
     # 7) Gericht anzeigen
     text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
@@ -1810,6 +1851,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─────────── quickone_confirm_cb ───────────
 async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     q = update.callback_query
     await q.answer()
     uid = str(update.effective_user.id)
@@ -1885,7 +1927,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Session aktualisieren
         sessions[uid]["beilagen"][dish] = side_nums
-        persist_session_for_chat(str(chat_id))
+        persist_session(update)
         sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
 
         # Gericht erneut anzeigen
@@ -1911,6 +1953,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     query = update.callback_query
     await query.answer()
     uid = str(query.from_user.id)
@@ -2109,6 +2152,7 @@ async def ask_showlist_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -2189,6 +2233,7 @@ async def ask_final_list_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     user_id = str(update.message.from_user.id)
     basis = df_gerichte
     reply = f"✅ Google Sheet OK, {len(basis)} Menüs verfügbar.\n"
@@ -2324,6 +2369,7 @@ def build_profile_overview_keyboard() -> InlineKeyboardMarkup:
 ##############################################
 
 async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     user_id = str(update.message.from_user.id)
     if user_id not in sessions:
         return await update.message.reply_text("⚠️ Nutze erst /menu.")
@@ -2423,7 +2469,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             swap_history[current_aufw].append(neu)
 
-    persist_session_for_chat(str(update.effective_chat.id))
+    persist_session(update)
 
     
     if show_debug_for(update):
@@ -2456,6 +2502,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def tausche_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     """
     Entry-Point für '/tausche' ohne Argumente:
     Zeigt ein Inline-Keyboard mit den Menü-Indizes 1…N zum Mehrfach-Tausch.
@@ -2537,6 +2584,7 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     """Callback, um per Inline-Button mehrere Gerichte zu markieren."""
     q = update.callback_query
     await q.answer()
@@ -2666,7 +2714,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         # Änderungen speichern
-        persist_session_for_chat(str(update.effective_chat.id))
+        persist_session(update)
         context.user_data["swapped_indices"] = swapped_slots
 
         if show_debug_for(update):
@@ -2710,6 +2758,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─────────── tausche_confirm_cb ───────────
 async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    ensure_session_loaded_for_user_and_chat(update)
     q = update.callback_query
     await q.answer()
     chat_id = q.message.chat.id
@@ -2806,6 +2855,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 ##############################################
 
 async def fertig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     if str(update.message.from_user.id) not in sessions:
         await update.message.reply_text("⚠️ Keine Menüs gewählt.")
         return ConversationHandler.END
@@ -2813,6 +2863,7 @@ async def fertig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return FERTIG_PERSONEN
 
 async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     # Personenzahl: zuerst aus context.user_data (Buttons), sonst aus Text
     user_id = str(update.effective_user.id)
     if "temp_persons" in context.user_data:
@@ -3395,6 +3446,7 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 ##############################################
 
 async def favorit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     user_id = str(update.message.from_user.id)
     if user_id not in sessions:
         return await update.message.reply_text("⚠️ Bitte erst /menu.")
@@ -3893,6 +3945,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ##############################################
 
 async def rezept_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     if str(update.message.from_user.id) not in sessions:
         await update.message.reply_text("⚠️ Keine Menüs gewählt.")
         return ConversationHandler.END
@@ -3911,6 +3964,7 @@ async def rezept_index(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def rezept_personen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_session_loaded_for_user_and_chat(update)
     try:
         user_id = str(update.message.from_user.id)
         personen = int(update.message.text.strip())
