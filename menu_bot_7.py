@@ -118,17 +118,31 @@ def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
 
 
 def _compute_base_url():
-    """
-    Nimmt PUBLIC_URL oder BASE_URL aus den Env-Vars, trimmt Trailing Slash.
-    Gibt None zurück, wenn nichts gesetzt ist.
-    """
-    url = os.getenv("PUBLIC_URL") or os.getenv("BASE_URL")
-    if not url:
-        return None
-    url = url.strip()
-    if url.endswith("/"):
-        url = url[:-1]
-    return url
+    # 1) Falls gesetzt, einfach nehmen
+    env_url = (os.getenv("PUBLIC_URL") or os.getenv("BASE_URL") or "").strip()
+    if env_url:
+        return env_url
+
+    # 2) In Cloud Run: kanonische URL selbst bauen
+    if os.getenv("K_SERVICE"):
+        try:
+            def _meta(path):
+                req = urllib.request.Request(
+                    f'http://metadata.google.internal/computeMetadata/v1/{path}',
+                    headers={"Metadata-Flavor": "Google"}
+                )
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    return r.read().decode()
+
+            service = os.getenv("K_SERVICE")
+            project_num = _meta("project/numeric-project-id")
+            region = _meta("instance/region").split("/")[-1]  # .../regions/<region>
+            return f"https://{service}-{project_num}.{region}.run.app"
+        except Exception as e:
+            print(f"⚠️ Konnte kanonische URL nicht ermitteln: {e}")
+
+    # 3) Fallback: leer -> Health-Server
+    return ""
 
 
 
@@ -283,33 +297,6 @@ sessions  = load_json(SESSIONS_FILE)
 history   = load_json(HISTORY_FILE)
 recipe_cache = {}
 
-def _compute_base_url():
-    # 1) Falls gesetzt, einfach nehmen
-    env_url = (os.getenv("PUBLIC_URL") or os.getenv("BASE_URL") or "").strip()
-    if env_url:
-        return env_url
-
-    # 2) In Cloud Run: kanonische URL selbst bauen
-    if os.getenv("K_SERVICE"):
-        try:
-            def _meta(path):
-                req = urllib.request.Request(
-                    f'http://metadata.google.internal/computeMetadata/v1/{path}',
-                    headers={"Metadata-Flavor": "Google"}
-                )
-                with urllib.request.urlopen(req, timeout=2) as r:
-                    return r.read().decode()
-
-            service = os.getenv("K_SERVICE")
-            project_num = _meta("project/numeric-project-id")
-            region = _meta("instance/region").split("/")[-1]  # .../regions/<region>
-            return f"https://{service}-{project_num}.{region}.run.app"
-        except Exception as e:
-            print(f"⚠️ Konnte kanonische URL nicht ermitteln: {e}")
-
-    # 3) Fallback: leer -> Health-Server
-    return ""
-    
 
 def build_swap_keyboard(menus: list[str], selected: set[int]) -> InlineKeyboardMarkup:
     """Buttons 1…N mit Toggle-Häkchen + ‘Fertig’."""
