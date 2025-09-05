@@ -5,7 +5,7 @@ import random
 import pandas as pd
 import gspread
 import warnings
-import requests
+import requests                                                 #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 import urllib.request
 import logging
 import httpx
@@ -15,20 +15,20 @@ from aiohttp import web
 from html import escape, unescape
 from datetime import datetime
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler    #HTTPServer könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from collections import Counter
-from fpdf import FPDF
+from fpdf import FPDF                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from fpdf.enums import XPos, YPos
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
-from typing import Set
+from typing import Set                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from decimal import Decimal, ROUND_HALF_UP
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram
-from telegram.constants import ChatAction, ParseMode
-from telegram.helpers import escape_markdown
+from telegram.constants import ChatAction, ParseMode        #ChatAction und ParseMode könnten gelöscht werden -> ausprobieren wenn mal zeit besteht
+from telegram.helpers import escape_markdown                #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from persistence import (
     user_key,
     get_profile as store_get_profile, set_profile as store_set_profile,
