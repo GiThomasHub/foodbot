@@ -25,12 +25,16 @@ steps:
       "--no-traffic",
       "--tag=cand",
 
-      "--concurrency=10",
-      "--cpu=1",
-      "--memory=1Gi",
-      "--min-instances=1",
-      "--cpu-boost",
-      
+      #Version: Schnell und Sparsam
+      "--concurrency=2",                    #Wieviele gleichzeitige Anfragen eine Instanz bearbeitet. Klein (=1–4) → geringe Latenz pro Request; groß (=20–80) → bessere Kosteneffizienz, aber höheres Queuing.
+      "--cpu=2",                            #Rechenleistung & RAM je Instanz. Mehr CPU beschleunigt CPU-gebundene Teile (Parsing, Crypto, Kompression). RAM gibt Headroom für Libs/Modelle.
+      "--memory=1Gi",                       #siehe cpu
+      "--min-instances=1",                  #So viele warme Instanzen ständig vorhalten (verhindert Kaltstart-Spikes).
+      #"--max-instances=100",               #Obergrenze der Skalierung. Zu niedrig → Throttling/Queue; moderat hoch → fängt Spitzen ab.  
+      "--no-cpu-throttling",                #CPU bleibt auch ohne laufende Requests aktiv → schnelleres „Anlaufen“ und stabilere P99-Latenz.
+      "--execution-environment=gen2",       #Moderne Runtime mit kürzerer Startup-Zeit.
+      "--cpu-boost",                        #Extra CPU während Startup/Scale-Out → schnellere Aufwärmung neuer Instanzen.
+   
       "--port=8080",
       "--allow-unauthenticated",
       "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest",
