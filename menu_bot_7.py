@@ -63,7 +63,6 @@ logging.getLogger("fpdf.output").setLevel(logging.ERROR)
 logging.getLogger("fontTools").setLevel(logging.ERROR)
 logging.getLogger("fontTools.subset").setLevel(logging.ERROR)
 
-import httpx
 
 HTTPX_TIMEOUT = httpx.Timeout(10.0, connect=3.0)  # 3s Connect, 10s gesamt
 HTTPX_LIMITS  = httpx.Limits(max_connections=100, max_keepalive_connections=20)
@@ -506,7 +505,6 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 # ===================================== FAVORITEN–HELPER =====================================
 # ============================================================================================
 
-import math
 
 def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 8 pro Zeile), gleichmäßig auf Zeilen verteilt + 'Fertig'."""
