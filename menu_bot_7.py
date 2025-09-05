@@ -290,14 +290,6 @@ def save_json(filename, data):
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-
-profiles  = load_json(PROFILES_FILE)
-favorites = load_json(FAV_FILE)
-sessions  = load_json(SESSIONS_FILE)
-history   = load_json(HISTORY_FILE)
-recipe_cache = {}
-
-
 def build_swap_keyboard(menus: list[str], selected: set[int]) -> InlineKeyboardMarkup:
     """Buttons 1…N mit Toggle-Häkchen + ‘Fertig’."""
     btns = []
