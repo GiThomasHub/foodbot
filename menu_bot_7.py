@@ -611,11 +611,18 @@ async def send_action_menu(msg):
 
 
 
-# Load persisted data
-sessions = load_json(SESSIONS_FILE)
-favorites = load_favorites()
-recipe_cache = load_json(CACHE_FILE)
-profiles = load_profiles()
+# Load persisted data (env-aware: avoid JSON preload when Firestore is enabled)
+if (os.getenv("PERSISTENCE") or "json").strip().lower() == "firestore":
+    sessions = {}
+    favorites = {}
+    profiles = {}
+    recipe_cache = {}
+else:
+    sessions = load_json(SESSIONS_FILE)
+    favorites = load_favorites()
+    recipe_cache = load_json(CACHE_FILE)
+    profiles = load_profiles()
+
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
