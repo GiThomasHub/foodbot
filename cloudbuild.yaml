@@ -21,7 +21,7 @@ steps:
       "run","deploy","foodbot",
       "--region=europe-west6",
       "--image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
-      "--set-env-vars=PERSISTENCE=firestore",
+      "--set-env-vars=PERSISTENCE=firestore,SHEETS_CACHE_TTL_SEC=3600,SHEETS_CACHE_NAMESPACE=v1",
       "--no-traffic",
       "--tag=cand",
 
