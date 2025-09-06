@@ -1,0 +1,116 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: "1800s"
+
+steps:
+  # 1) Build
+  - name: gcr.io/cloud-builders/docker
+    id: Build Image
+    args: ["build","-t","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA","."]
+
+  # 2) Push
+  - name: gcr.io/cloud-builders/docker
+    id: Push Image
+    args: ["push","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"]
+
+  # 3) Deploy 0% (kein Tagging)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Deploy 0%
+    entrypoint: gcloud
+    args: [
+      "run","deploy","foodbot",
+      "--region=europe-west6",
+      "--image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
+      "--no-traffic",
+      "--tag=cand",
+
+      "--concurrency=10",
+      "--cpu=1",
+      "--memory=1Gi",
+      "--min-instances=1",
+      "--cpu-boost",
+      
+      "--port=8080",
+      "--allow-unauthenticated",
+      "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest",
+      "--quiet"
+    ]
+
+  # 4) Kandidat routbar machen: 0% an CAND hängen (LIVE bleibt 100%)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Attach 0% route to candidate
+    entrypoint: bash
+    args:
+      - "-c"
+      - >
+        set -euo pipefail;
+        region=europe-west6; service=foodbot;
+        cand="$(gcloud run services describe "$service" --region "$region" --format='value(status.latestCreatedRevisionName)')";
+        live="$(gcloud run services describe "$service" --region "$region" --format='value(status.latestReadyRevisionName)')";
+        echo "candidate=$cand live=$live";
+        test -n "$cand" || { echo "❌ no candidate revision"; exit 10; };
+        if [ -n "$live" ] && [ "$live" != "$cand" ]; then
+          echo "→ set traffic: $live=100, $cand=0";
+          gcloud run services update-traffic "$service" --region "$region" --to-revisions "$live=100,$cand=0";
+        else
+          echo "→ first rollout: make $cand routable at 0%";
+          gcloud run services update-traffic "$service" --region "$region" --to-revisions "$cand=0";
+        fi;
+        printf '%s' "$cand" > /workspace/cand.txt;
+
+  # 5) Ready → Health (Revision-URL) → Traffic 100%
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Ready + Health + Traffic
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -eo pipefail   # kein -u
+        region=europe-west6
+        service=foodbot
+        cand="$(cat /workspace/cand.txt)"
+        echo "track candidate: $cand"
+
+        # Auf Ready warten (robust, JSON)
+        for i in $(seq 1 80); do
+          js="$(gcloud run revisions describe "$cand" --region=europe-west6 --format=json 2>/dev/null || true)"
+          if [ -z "$js" ]; then
+            printf '  [%02d/80] describe returned empty (retry)\n' "$i"
+            sleep 6
+            continue
+          fi
+          ready="$(printf '%s' "$js" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(next((c.get("status","") for c in d.get("status",{}).get("conditions",[]) if c.get("type")=="Ready"), ""))')"
+          printf '  [%02d/80] Ready=%s\n' "$i" "${ready:-?}"
+          [ "$ready" = "True" ] && break
+          sleep 6
+        done
+
+        if [ "$ready" != "True" ]; then
+          echo "📜 recent logs for $cand:"
+          gcloud logging read \
+            "resource.type=cloud_run_revision AND resource.labels.service_name=$service AND resource.labels.revision_name=$cand" \
+            --limit=150 --order=desc --format='value(textPayload)' || true
+          echo "❌ Ready not reached"; exit 21
+        fi
+
+        # (NEU) Health per Tag-URL cand
+        svc_url="$(gcloud run services describe "$service" --region=europe-west6 --format='value(status.url)')"
+        host="${svc_url#https://}"
+        cand_url="https://cand---${host}"
+        echo "🌐 Candidate-URL: $cand_url"
+
+        echo "🩺 GET ${cand_url%/}/webhook/health"
+        code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${cand_url%/}/webhook/health" || echo 000)"
+        echo "→ HTTP $code"
+        if [ "$code" != "200" ]; then
+          echo "❌ health != 200"; exit 22
+        fi
+
+
+        echo "🔁 traffic → $cand=100"
+        gcloud run services update-traffic "$service" --region=europe-west6 --to-revisions "$cand=100"
+        echo "✅ Traffic 100% auf $cand"
+
+
+images:
+  - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
