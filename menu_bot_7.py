@@ -8,6 +8,7 @@ import warnings
 import requests                                                 #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 import urllib.request
 import logging
+import base64, gzip, time
 import httpx
 import math
 import asyncio
@@ -24,6 +25,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
 from typing import Set                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from decimal import Decimal, ROUND_HALF_UP
+from google.cloud import firestore
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram
@@ -156,6 +158,13 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # darf None sein
 SHEET_ID = os.getenv("SHEET_ID", "1XzhGPWz7EFJAyZzaJQhoLyl-cTFNEa0yKvst0D0yVUs")
 SHEET_GERICHTE = os.getenv("SHEET_GERICHTE", "Gerichte")
 SHEET_ZUTATEN = os.getenv("SHEET_ZUTATEN", "Zutaten")
+PERSISTENCE = (os.getenv("PERSISTENCE") or "json").strip().lower()
+SHEETS_CACHE_TTL_SEC = int(os.getenv("SHEETS_CACHE_TTL_SEC", "3600"))
+SHEETS_CACHE_NAMESPACE = os.getenv("SHEETS_CACHE_NAMESPACE", "v1")
+
+# Firestore-Client nur nutzen, wenn PERSISTENCE=firestore (Prod)
+FS = firestore.Client() if PERSISTENCE == "firestore" else None
+
 
 
 # Instantiate OpenAI client (new SDK)
@@ -245,6 +254,51 @@ def save_json(path, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# ---------- Sheets-Cache (Firestore) ----------
+def _df_to_compact_json(df: pd.DataFrame) -> dict:
+    """Sehr kompaktes Format: Spalten + Zeilen als Liste von Listen."""
+    return {
+        "cols": list(df.columns),
+        "rows": df.astype(object).values.tolist(),  # vermeidet numpy-Types im JSON
+    }
+
+def _compact_json_to_df(obj: dict) -> pd.DataFrame:
+    return pd.DataFrame(obj["rows"], columns=obj["cols"])
+
+def _fs_doc_for(name: str):
+    """
+    name ∈ {"gerichte","beilagen","zutaten"} → Doc-Pfad:
+    sheets_cache/<SHEET_ID>/<NAMESPACE>/<name>
+    """
+    return FS.collection("sheets_cache").document(SHEET_ID).collection(SHEETS_CACHE_NAMESPACE).document(name)
+
+def _cache_read_if_fresh(name: str, ttl_sec: int):
+    if not FS:
+        return None
+    doc = _fs_doc_for(name).get()
+    if not doc.exists:
+        return None
+    d = doc.to_dict() or {}
+    updated_ts = int(d.get("updated_ts", 0))
+    if time.time() - updated_ts > ttl_sec:
+        return None  # abgelaufen
+    try:
+        payload = gzip.decompress(base64.b64decode(d["payload_b64_gzip"]))
+        return json.loads(payload.decode("utf-8"))
+    except Exception:
+        return None
+
+def _cache_write(name: str, compact_obj: dict):
+    if not FS:
+        return
+    payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
+    b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
+    _fs_doc_for(name).set({
+        "payload_b64_gzip": b64,
+        "updated_ts": int(time.time()),
+        "ttl_sec": SHEETS_CACHE_TTL_SEC,
+        "schema_version": 1,
+    }, merge=True)
 
 def load_favorites() -> dict:
     """Favoriten aus Datei laden (oder leeres Dict, wenn Datei fehlt)"""
@@ -685,9 +739,46 @@ def lade_zutaten():
     df["Menge"] = pd.to_numeric(df["Menge"], errors="coerce").fillna(0)
     return df
 
-df_gerichte = lade_gerichtebasis()
-df_beilagen = lade_beilagen()
-df_zutaten  = lade_zutaten()
+
+def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
+    """
+    1) Frischen Snapshot aus Firestore holen (60min TTL)
+    2) Falls leer/abgelaufen → direkt aus Sheets laden, transformieren, in Firestore ablegen
+    3) DataFrames zurückgeben
+    """
+    # 1) Versuche Firestore-Cache (frisch)
+    if FS:
+        cg = _cache_read_if_fresh("gerichte", ttl_sec)
+        cb = _cache_read_if_fresh("beilagen", ttl_sec)
+        cz = _cache_read_if_fresh("zutaten",  ttl_sec)
+        if cg and cb and cz:
+            print("Sheets-Cache: HIT (Firestore, frisch)")
+            return (
+                _compact_json_to_df(cg),
+                _compact_json_to_df(cb),
+                _compact_json_to_df(cz),
+            )
+        else:
+            print("Sheets-Cache: MISS/EXPIRED → lade aus Google Sheets")
+
+    # 2) Aus Google Sheets laden (deine bestehenden Loader)
+    df_g = lade_gerichtebasis()
+    df_b = lade_beilagen()
+    df_z = lade_zutaten()
+
+    # 3) In Firestore als kompaktes JSON ablegen (nur wenn FS aktiv)
+    if FS:
+        try:
+            _cache_write("gerichte", _df_to_compact_json(df_g))
+            _cache_write("beilagen", _df_to_compact_json(df_b))
+            _cache_write("zutaten",  _df_to_compact_json(df_z))
+            print("Sheets-Cache: Snapshot in Firestore aktualisiert")
+        except Exception as e:
+            print(f"⚠️ Cache-Write Fehler: {e}")
+
+    return df_g, df_b, df_z
+
+df_gerichte, df_beilagen, df_zutaten = _load_sheets_via_cache()
 
 
 # -------------------------------------------------
