@@ -1,0 +1,38 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: "1800s"
+
+
+steps:
+  # 1) Build
+  - name: gcr.io/cloud-builders/docker
+    id: Build
+    args: ['build', '-t', 'europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA', '.']
+
+  # 2) Push
+  - name: gcr.io/cloud-builders/docker
+    id: Push
+    args: ['push', 'europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA']
+
+  # 3) Deploy zu foodbot-dev (mit DEV-Secrets)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Deploy to foodbot-dev
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - foodbot-dev
+      - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA
+      - --region=europe-west6
+      - --allow-unauthenticated
+      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY_DEV:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_DEV:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON_DEV:latest,OPENAI_API_KEY=OPENAI_API_KEY_DEV:latest
+      - --set-env-vars=SHEETS_CACHE_NAMESPACE=dev,PERSISTENCE=json
+      - --concurrency=2
+      - --cpu=2
+      - --memory=1Gi
+      - --min-instances=1
+      - --execution-environment=gen2
+      - --cpu-boost
+
+images:
+  - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA
