@@ -21,58 +21,68 @@ steps:
       "run","deploy","foodbot",
       "--region=europe-west6",
       "--image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA",
-      "--set-env-vars=PERSISTENCE=firestore,SHEETS_CACHE_TTL_SEC=3600,SHEETS_CACHE_NAMESPACE=v1",
-      "--no-traffic",
-      "--tag=cand",
 
-      # Performance/Energies: wie in deiner funktionierenden Pipeline
-      "--concurrency=2",                    #Wieviele gleichzeitige Anfragen eine Instanz bearbeitet. Klein (=1–4) → geringe Latenz pro Request; groß (=20–80) → bessere Kosteneffizienz, aber höheres Queuing.
-      "--cpu=2",                            #Rechenleistung & RAM je Instanz. Mehr CPU beschleunigt CPU-gebundene Teile (Parsing, Crypto, Kompression). RAM gibt Headroom für Libs/Modelle.
-      "--memory=1Gi",                       #siehe cpu
-      "--min-instances=1",                  #So viele warme Instanzen ständig vorhalten (verhindert Kaltstart-Spikes).
-      #"--max-instances=100",               #Obergrenze der Skalierung. Zu niedrig → Throttling/Queue; moderat hoch → fängt Spitzen ab.  
-      "--no-cpu-throttling",                #CPU bleibt auch ohne laufende Requests aktiv → schnelleres „Anlaufen“ und stabilere P99-Latenz.
-      "--execution-environment=gen2",       #Moderne Runtime mit kürzerer Startup-Zeit.
-      "--cpu-boost",                        #Extra CPU während Startup/Scale-Out → schnellere Aufwärmung neuer Instanzen.
+      # Prod-ENV und Ressourcen (wie in deiner funktionierenden Pipeline)
+      "--set-env-vars=PERSISTENCE=firestore,SHEETS_CACHE_TTL_SEC=3600,SHEETS_CACHE_NAMESPACE=v1",
+      "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY_PROD:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_PROD:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON_PROD:latest,OPENAI_API_KEY=OPENAI_API_KEY_PROD:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest",
+      "--concurrency=2",
+      "--cpu=2",
+      "--memory=1Gi",
+      "--min-instances=1",
+      "--execution-environment=gen2",
+      "--cpu-boost",
+      "--no-cpu-throttling",
       "--port=8080",
       "--allow-unauthenticated",
-      "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY_PROD:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_PROD:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON_PROD:latest,OPENAI_API_KEY=OPENAI_API_KEY_PROD:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest",
+
+      # Canary-Vorbereitung
+      "--no-traffic",
+      "--tag=cand",
       "--quiet"
     ]
 
-  # 4) Kandidat routbar machen: 0% an cand hängen (live bleibt 100%)
+  # 4) Kandidaten- und Live-Revision an Route hängen (live=100%, cand=0%)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Attach 0% route to candidate
     entrypoint: bash
     args:
-      - "-c"
-      - >
-        set -euo pipefail;
-        region=europe-west6; service=foodbot;
-        cand="$(gcloud run services describe "$service" --region "$region" --format='value(status.latestCreatedRevisionName)')";
-        live="$(gcloud run services describe "$service" --region "$region" --format='value(status.latestReadyRevisionName)')";
-        echo "candidate=$cand live=$live";
-        test -n "$cand" || { echo "❌ no candidate revision"; exit 10; };
-        if [ -n "$live" ] && [ "$live" != "$cand" ]; then
-          echo "→ set traffic: $live=100, $cand=0";
-          gcloud run services update-traffic "$service" --region "$region" --to-revisions "$live=100,$cand=0";
-        else
-          echo "→ ensure $cand is attached with 0%";
-          gcloud run services update-traffic "$service" --region "$region" --to-revisions "$cand=0";
-        fi;
-        printf '%s' "$cand" > /workspace/cand.txt;
+      - -c
+      - |
+        set -euo pipefail
+        region=europe-west6
+        service=foodbot
 
-  # 5) Ready → Health (Revision-URL) → (Promote später)
+        cand="$(gcloud run services describe "$service" --region "$region" --format='value(status.latestCreatedRevisionName)')"
+        live="$(gcloud run services describe "$service" --region "$region" --format='value(status.latestReadyRevisionName)')"
+        echo "candidate=$cand live=$live"
+        test -n "$cand" || { echo "❌ no candidate revision"; exit 10; }
+
+        if [ -n "$live" ] && [ "$live" != "$cand" ]; then
+          echo "→ set traffic: $live=100, $cand=0"
+          gcloud run services update-traffic "$service" --region "$region" --to-revisions "$live=100,$cand=0"
+        else
+          echo "→ ensure $cand attached with 0%"
+          gcloud run services update-traffic "$service" --region "$region" --to-revisions "$cand=0"
+        fi
+
+        # cand-URL (über Tag) speichern
+        cand_url="$(gcloud run services describe "$service" --region "$region" --format="value(status.traffic[?tag='cand'].url)")"
+        test -n "${cand_url:-}" || { echo "❌ no cand URL"; exit 11; }
+        printf '%s' "$cand" > /workspace/cand.txt
+        printf '%s' "$cand_url" > /workspace/cand_url.txt
+        echo "cand_url=$cand_url"
+
+  # 5) Ready warten (robust) + Health-Check über cand-URL
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Ready + Health check
     entrypoint: bash
     args:
       - -c
       - |
-        set -eo pipefail   # kein -u, um leere Describes abzufangen
+        set -eo pipefail   # kein -u, damit leere Describes retried werden
         region=europe-west6
-        service=foodbot
         cand="$(cat /workspace/cand.txt)"
+        cand_url="$(cat /workspace/cand_url.txt)"
 
         echo "⏳ waiting for $cand to be Ready..."
         ready=""
@@ -83,30 +93,37 @@ steps:
             sleep 6
             continue
           fi
-          ready="$(printf '%s' "$js" | python3 -c 'import sys,json; c=json.load(sys.stdin); print(next((x.get("status","") for x in c.get("status",{}).get("conditions",[]) if x.get("type")=="Ready"), ""))')"
-          printf '  [%02d/80] Ready=%s\n' "$i" "${ready:-?}"
+          ready="$(printf '%s' "$js" | python3 - <<'PY'
+import sys,json
+c=json.load(sys.stdin)
+print(next((x.get("status","") for x in c.get("status",{}).get("conditions",[]) if x.get("type")=="Ready"), ""))
+PY
+)"
+          printf '  [%02d/80] Ready=%s\n' "$i" "${ready or '?'}"
           [ "$ready" = "True" ] && break
           sleep 6
         done
 
         if [ "$ready" != "True" ]; then
-          echo "📜 recent logs for $cand:"
+          echo "📜 recent logs:"
           gcloud logging read \
             'resource.type="cloud_run_revision" AND resource.labels.revision_name="'$cand'"' \
-            --limit=50 --order=desc --format='value(textPayload)' || true
+            --limit=80 --order=desc --format='value(textPayload)' || true
           echo "❌ Timeout waiting for Ready"; exit 23
         fi
 
-        # Health-Check (Revision-URL)
-        cand_url="$(gcloud run revisions describe "$cand" --region="$region" --format='value(status.url)')"
         echo "🩺 GET ${cand_url%/}/webhook/health"
         code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${cand_url%/}/webhook/health" || echo 000)"
         echo "→ HTTP $code"
         if [ "$code" != "200" ]; then
+          echo "📜 recent logs (health fail):"
+          gcloud logging read \
+            'resource.type="cloud_run_revision" AND resource.labels.revision_name="'$cand'"' \
+            --limit=80 --order=desc --format='value(textPayload)' || true
           echo "❌ health != 200"; exit 22
         fi
 
-  # 6) Promote: Traffic → 100% auf Kandidat
+  # 6) Promote: 100% Traffic auf Kandidat
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Promote to 100%
     entrypoint: bash
