@@ -13,7 +13,7 @@ steps:
     id: Push Image
     args: ["push","europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"]
 
-  # 3) Deploy 0% (kein Tagging)
+  # 3) Deploy 0% (mit Tag 'cand')
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Deploy 0%
     entrypoint: gcloud
@@ -25,18 +25,20 @@ steps:
       "--no-traffic",
       "--tag=cand",
 
-      #Version: Schnell und Sparsam
-      "--concurrency=2",                    #Wieviele gleichzeitige Anfragen eine Instanz bearbeitet. Klein (=1–4) → geringe Latenz pro Request; groß (=20–80) → bessere Kosteneffizienz, aber höheres Queuing.
-      "--cpu=2",                            #Rechenleistung & RAM je Instanz. Mehr CPU beschleunigt CPU-gebundene Teile (Parsing, Crypto, Kompression). RAM gibt Headroom für Libs/Modelle.
-      "--memory=1Gi",                       #siehe cpu
-      "--min-instances=1",                  #So viele warme Instanzen ständig vorhalten (verhindert Kaltstart-Spikes).
-      #"--max-instances=100",               #Obergrenze der Skalierung. Zu niedrig → Throttling/Queue; moderat hoch → fängt Spitzen ab.  
-      "--no-cpu-throttling",                #CPU bleibt auch ohne laufende Requests aktiv → schnelleres „Anlaufen“ und stabilere P99-Latenz.
-      "--execution-environment=gen2",       #Moderne Runtime mit kürzerer Startup-Zeit.
-      "--cpu-boost",                        #Extra CPU während Startup/Scale-Out → schnellere Aufwärmung neuer Instanzen.
-   
+      # Version: Schnell und Sparsam (unverändert aus deinem File)
+      "--concurrency=2",
+      "--cpu=2",
+      "--memory=1Gi",
+      "--min-instances=1",
+      #"--max-instances=100",
+      "--no-cpu-throttling",
+      "--execution-environment=gen2",
+      "--cpu-boost",
+
       "--port=8080",
       "--allow-unauthenticated",
+
+      # PROD-Secrets (wie in deinem funktionierenden File)
       "--set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY:latest,OPENAI_API_KEY=OPENAI_API_KEY:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON:latest",
       "--quiet"
     ]
@@ -63,7 +65,7 @@ steps:
         fi;
         printf '%s' "$cand" > /workspace/cand.txt;
 
-  # 5) Ready → Health (Revision-URL) → Traffic 100%
+  # 5) Ready → Health (cand-URL) → Traffic 100%
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: Ready + Health + Traffic
     entrypoint: bash
@@ -78,7 +80,7 @@ steps:
 
         # Auf Ready warten (robust, JSON)
         for i in $(seq 1 80); do
-          js="$(gcloud run revisions describe "$cand" --region=europe-west6 --format=json 2>/dev/null || true)"
+          js="$(gcloud run revisions describe "$cand" --region="$region" --format=json 2>/dev/null || true)"
           if [ -z "$js" ]; then
             printf '  [%02d/80] describe returned empty (retry)\n' "$i"
             sleep 6
@@ -98,8 +100,8 @@ steps:
           echo "❌ Ready not reached"; exit 21
         fi
 
-        # (NEU) Health per Tag-URL cand
-        svc_url="$(gcloud run services describe "$service" --region=europe-west6 --format='value(status.url)')"
+        # Health per Tag-URL cand (wie bei dir)
+        svc_url="$(gcloud run services describe "$service" --region="$region" --format='value(status.url)')"
         host="${svc_url#https://}"
         cand_url="https://cand---${host}"
         echo "🌐 Candidate-URL: $cand_url"
@@ -111,11 +113,9 @@ steps:
           echo "❌ health != 200"; exit 22
         fi
 
-
         echo "🔁 traffic → $cand=100"
-        gcloud run services update-traffic "$service" --region=europe-west6 --to-revisions "$cand=100"
+        gcloud run services update-traffic "$service" --region="$region" --to-revisions "$cand=100"
         echo "✅ Traffic 100% auf $cand"
-
 
 images:
   - "europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$COMMIT_SHA"
