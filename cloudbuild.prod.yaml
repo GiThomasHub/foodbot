@@ -13,9 +13,9 @@ steps:
     id: Push
     args: ['push', 'europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA']
 
-  # 3) Deploy zu PROD (Cloud Run Service heißt: foodbot)
+  # 3) Deploy als Kandidat (0 % Traffic)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    id: Deploy to foodbot (prod)
+    id: Deploy (no-traffic)
     entrypoint: gcloud
     args:
       - run
@@ -24,14 +24,82 @@ steps:
       - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA
       - --region=europe-west6
       - --allow-unauthenticated
+      - --no-traffic
       - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY_PROD:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_PROD:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON_PROD:latest,OPENAI_API_KEY=OPENAI_API_KEY_PROD:latest,GITHUB_TOKEN=GITHUB_TOKEN:latest
       - --set-env-vars=SHEETS_CACHE_NAMESPACE=prod,PERSISTENCE=firestore
-      - --concurrency=2
-      - --cpu=2
-      - --memory=1Gi
-      - --min-instances=1
-      - --execution-environment=gen2
-      - --cpu-boost
+      - --concurrency=2                    #Wieviele gleichzeitige Anfragen eine Instanz bearbeitet. Klein (=1–4) → geringe Latenz pro Request; groß (=20–80) → bessere Kosteneffizienz, aber höheres Queuing.
+      - --cpu=2                            #Rechenleistung & RAM je Instanz. Mehr CPU beschleunigt CPU-gebundene Teile (Parsing, Crypto, Kompression). RAM gibt Headroom für Libs/Modelle.
+      - --memory=1Gi                       #siehe cpu
+      - --min-instances=1                  #So viele warme Instanzen ständig vorhalten (verhindert Kaltstart-Spikes).
+      #- --max-instances=100               #Obergrenze der Skalierung. Zu niedrig → Throttling/Queue; moderat hoch → fängt Spitzen ab.  
+      - --no-cpu-throttling                #CPU bleibt auch ohne laufende Requests aktiv → schnelleres „Anlaufen“ und stabilere P99-Latenz.
+      - --execution-environment=gen2       #Moderne Runtime mit kürzerer Startup-Zeit.
+      - --cpu-boost                        #Extra CPU während Startup/Scale-Out → schnellere Aufwärmung neuer Instanzen.
+
+  # 4) Kandidat-Revisionsname ermitteln
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Get candidate revision
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        region=europe-west6
+        service=foodbot
+        cand="$(gcloud run services describe "$service" --region="$region" --format='value(status.latestCreatedRevisionName)')"
+        echo "$cand" | tee /workspace/cand.txt
+
+  # 5) Warten bis Ready (robust)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Wait until Ready
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        region=europe-west6
+        cand="$(cat /workspace/cand.txt)"
+        echo "⏳ waiting for $cand to be Ready..."
+        for i in $(seq 1 80); do
+          ready="$(gcloud run revisions describe "$cand" --region="$region" --format="value(status.conditions[?type='Ready'].status)")"
+          [[ "$ready" == "True" ]] && { echo "✅ Ready"; exit 0; }
+          printf '  [%02d/80] not ready yet\n' "$i"
+          sleep 3
+        done
+        echo "❌ Timeout waiting for Ready"; exit 23
+
+  # 6) Health-Check des Kandidaten
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Health check
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        region=europe-west6
+        cand="$(cat /workspace/cand.txt)"
+        cand_url="$(gcloud run revisions describe "$cand" --region="$region" --format='value(status.url)')"
+        echo "🩺 GET ${cand_url%/}/webhook/health"
+        code="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' "${cand_url%/}/webhook/health" || echo 000)"
+        echo "→ HTTP $code"
+        if [ "$code" != "200" ]; then
+          echo "❌ health != 200"; exit 22
+        fi
+
+  # 7) Promote: Traffic → 100 % auf Kandidat
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: Promote to 100%
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        region=europe-west6
+        service=foodbot
+        cand="$(cat /workspace/cand.txt)"
+        echo "🔁 traffic → $cand=100"
+        gcloud run services update-traffic "$service" --region="$region" --to-revisions "$cand=100"
+        echo "✅ Traffic 100% auf $cand"
 
 images:
   - europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA
