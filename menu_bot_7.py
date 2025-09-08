@@ -780,6 +780,13 @@ def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
 
 df_gerichte, df_beilagen, df_zutaten = _load_sheets_via_cache()
 
+# --- Normalisierung: Typ immer als "1"/"2"/"3" ---
+df_gerichte["Typ"] = (
+    pd.to_numeric(df_gerichte["Typ"], errors="coerce")
+      .astype("Int64")
+      .map({1: "1", 2: "2", 3: "3"})
+      .fillna("2")
+)
 
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
@@ -834,23 +841,25 @@ def sample_by_weight(df: pd.DataFrame, weight: int, k: int) -> pd.DataFrame:
         "heavy":  k - int(k * l_part / total_parts) - int(k * m_part / total_parts),
     }
 
+    nL = min(len(df_light),  target["light"])
+    nM = min(len(df_medium), target["medium"])
+    nH = min(len(df_heavy),  target["heavy"])
+
     chosen = {
-        "light":  df_light.sample(
-            n=min(len(df_light),  target["light"]),
-            replace=False,
-            weights=pd.to_numeric(df_light["Gewicht"], errors="coerce").fillna(1.0)
-        ),
-        "medium": df_medium.sample(
-            n=min(len(df_medium), target["medium"]),
-            replace=False,
-            weights=pd.to_numeric(df_medium["Gewicht"], errors="coerce").fillna(1.0)
-        ),
-        "heavy":  df_heavy.sample(
-            n=min(len(df_heavy),  target["heavy"]),
-            replace=False,
-            weights=pd.to_numeric(df_heavy["Gewicht"], errors="coerce").fillna(1.0)
-        ),
+        "light":  (df_light.sample(
+                      n=nL, replace=False,
+                      weights=pd.to_numeric(df_light["Gewicht"], errors="coerce").fillna(1.0)
+                  ) if nL > 0 and not df_light.empty else df_light.iloc[:0].copy()),
+        "medium": (df_medium.sample(
+                      n=nM, replace=False,
+                      weights=pd.to_numeric(df_medium["Gewicht"], errors="coerce").fillna(1.0)
+                  ) if nM > 0 and not df_medium.empty else df_medium.iloc[:0].copy()),
+        "heavy":  (df_heavy.sample(
+                      n=nH, replace=False,
+                      weights=pd.to_numeric(df_heavy["Gewicht"], errors="coerce").fillna(1.0)
+                  ) if nH > 0 and not df_heavy.empty else df_heavy.iloc[:0].copy()),
     }
+
 
     # --------------------- Auffüllen nach Hierarchie --------------------
     def take(df_src, need):
