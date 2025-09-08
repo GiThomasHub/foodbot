@@ -47,6 +47,7 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     CallbackQueryHandler,
+    Defaults,
 )
 from telegram.warnings import PTBUserWarning
 
@@ -213,14 +214,14 @@ ART_ORDER = {"1": 1, "2": 2, "3": 3}
 
 # Emoji-Zuordnung für Kategorien
 CAT_EMOJI = {
-    "Fleisch & Fisch":       "🥩🐟",
-    "Obst & Gemüse":        "🍎🥕",
-    "Getränke":      "🧃🍷",
-    "Trockenware & Vorrat":"🍝🥫",
-    "Milchwaren":    "🧀🥛",
-    "Backwaren":     "🥖🥐",
-    "Kühlregal": "🥶🧊",
-    "Haushalt & Sonstiges": "🧽🧻",
+    "Fleisch & Fisch":       "🥩",    #"🥩🐟",
+    "Obst & Gemüse":        "🥕",     #"🍎🥕",
+    "Getränke":      "🧃",            #"🧃🍷",
+    "Trockenware & Vorrat":"🥫",      #"🍝🥫",
+    "Milchwaren":    "🥛",           #"🧀🥛",
+    "Backwaren":     "🥖",       #"🥖🥐",
+    "Kühlregal": "🥶",             #"🥶🧊",
+    "Haushalt & Sonstiges": "🧻",  #"🧽🧻",
 
 }
 
@@ -962,7 +963,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Willkommen!\n"
         "Übersicht der Befehle:\n\n"
         "🍲 Menü – Lass Dir leckere Gerichte vorschlagen\n\n"
-        "⚡ QuickOne – Ein Gericht ohne Einschränkungen\n\n"
+        "⚡ QuickOne – Ein Gericht / Keine Einschränkungen\n\n"
         "🔖 Favoriten – Deine Favoriten\n\n"
         "🛠️ Übersicht – Alle Funktionen\n\n"
     )
@@ -1125,7 +1126,6 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_and_log(
                 profile_overview_text(profiles[uid]),
                 reply_markup=build_profile_overview_keyboard(),
-                parse_mode="Markdown"
             )
             return PROFILE_OVERVIEW
 
@@ -1308,7 +1308,7 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["menu_count"] = count
         context.user_data["aufwand_verteilung"] = {"light": 0, "medium": 0, "heavy": 0}
         await query.message.edit_text(
-            f"Du suchst *{count}* Gerichte ✅\nDefiniere deren Aufwand:",
+            f"Du suchst <b>{count}</b> Gerichte ✅\nDefiniere deren Aufwand:",
             reply_markup=build_aufwand_keyboard(context.user_data["aufwand_verteilung"], count)
         )
         return MENU_AUFWAND
@@ -1703,7 +1703,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"- {format_dish_with_sides(dish, side_names)}\n"
+                text      += f"- {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -1887,8 +1887,8 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     persist_session(update)
 
     # 7) Gericht anzeigen
-    text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
-    msg1 = await context.bot.send_message(chat_id, text=pad_message(text1), parse_mode="Markdown")
+    text1 = f"🥣 <b>Dein Gericht:</b>\n{escape(format_dish_with_sides(dish, sides))}"
+    msg1 = await context.bot.send_message(chat_id, text=pad_message(text1))
     context.user_data["flow_msgs"].append(msg1.message_id)
 
     # 8) Frage „Passt das?“
@@ -1987,8 +1987,8 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
 
         # Gericht erneut anzeigen
-        text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
-        msg1 = await context.bot.send_message(chat_id, text=text1, parse_mode="Markdown")
+        text1 = f"🥣 <b>Dein Gericht:</b>\n{escape(format_dish_with_sides(dish, sides))}"
+        msg1 = await context.bot.send_message(chat_id, text=pad_message(text1))
         context.user_data["flow_msgs"].append(msg1.message_id)
 
         # Wieder „Passt das?“
@@ -2035,7 +2035,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             side_names = df_beilagen.loc[
                 df_beilagen["Nummer"].isin(sel_nums), "Beilagen"
             ].tolist()
-            text += f"- {format_dish_with_sides(dish, side_names)}\n"
+            text += f"- {escape(format_dish_with_sides(dish, side_names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2135,9 +2135,8 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
 
     # 5) Nachricht senden + tracken
     msg = await update_or_query.message.reply_text(
-        pad_message(f"Wähle Beilagen für: *{gericht}*"),
+        pad_message(f"Wähle Beilagen für: <b>{escape(gericht)}</b>"),
         reply_markup=InlineKeyboardMarkup(rows),
-        parse_mode="Markdown"
     )
     context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2244,7 +2243,7 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for dish in sessions[uid]["menues"]:
             nums = sessions[uid].get("beilagen", {}).get(dish, [])
             names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-            text += f"- {format_dish_with_sides(dish, names)}\n"
+            text += f"- {escape(format_dish_with_sides(dish, names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2304,7 +2303,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ].tolist()
             # Grammatik-korrekte Verkettung
             formatted = format_dish_with_sides(dish, beiname)
-            reply += f"- {formatted}\n"
+            reply += f"- {escape(formatted)}\n"
     else:
         reply += "ℹ️ Keine aktive Session."
     await update.message.reply_text(reply)
@@ -2404,10 +2403,10 @@ def profile_overview_text(p: dict) -> str:
     """Formatiert die Profil-Übersicht"""
     styles_str = "Alle Stile" if not p["styles"] else ", ".join(p["styles"])
     return (
-        "🗂 **Dein Profil**\n"
-        f"• Ernährungsstil: {p['restriction']}\n"
-        f"• Küche: {styles_str}\n"
-        f"• Typ: {p['weight'] if p['weight'] else 'Egal'}"
+        "🗂 <b>Dein Profil</b>\n"
+        f"• Ernährungsstil: {escape(str(p.get('restriction', '')))}\n"
+        f"• Küche: {escape(styles_str)}\n"
+        f"• Typ: {escape(str(p.get('weight', 'Egal') or 'Egal'))}"
     )
 
 def build_profile_overview_keyboard() -> InlineKeyboardMarkup:
@@ -2879,7 +2878,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"- {format_dish_with_sides(dish, side_names)}\n"
+                text      += f"- {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await q.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
@@ -3473,7 +3472,7 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         overview = (
             "Übersicht der Befehle:\n\n"
             "🍲 Menü – Lass Dir leckere Gerichte vorschlagen\n\n"
-            "⚡ QuickOne – Ein Gericht ohne Einschränkungen\n\n"
+            "⚡ QuickOne – Ein Gericht / Keine Einschränkungen\n\n"
             "🔖 Favoriten – Deine Favoriten\n\n"
             "🛠️ Übersicht – Alle Funktionen"
         )
@@ -3537,19 +3536,19 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Übersicht senden und ID speichern
 # Übersicht senden und ID speichern
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {d}" for d in favs)
+    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {escape(d)}" for d in favs)
     m1 = await msg.reply_text(pad_message(txt))
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Selektieren", callback_data="fav_action_select"),
         InlineKeyboardButton("Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("Zurück",      callback_data="fav_action_back")
+        InlineKeyboardButton("⏪ Zurück",      callback_data="fav_action_back")
     ]])
     m2 = await msg.reply_text(
         "Was möchtest Du machen?\n\n"
-        "🤩 Favoriten für Gerichteauswahl *selektieren*\n"
-        "❌ Favoriten aus Liste *entfernen*\n"
-        "⏪ *Zurück* zum Hauptmenü\n"
-        , reply_markup=kb)
+        "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n"
+        "❌ Favoriten aus Liste <b>entfernen</b>\n"
+        "⏪ <b>Zurück</b> zum Hauptmenü\n",
+    reply_markup=kb
     context.user_data["fav_msgs"].extend([m1.message_id, m2.message_id])
     return FAV_OVERVIEW
 
@@ -3815,7 +3814,7 @@ async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     # sonst neue Übersicht + Ja/Nein, IDs neu setzen
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {d}" for d in favs)
+    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {escape(d)}" for d in favs)
     m1  = await q.message.reply_text(pad_message(txt))
     m2  = await q.message.reply_text(
         "Bearbeiten?",
@@ -3854,7 +3853,7 @@ async def fav_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     existing_favs = set(favorites.get(user_id, []))
     list_msg = await msg.reply_text(
         "\n".join(
-            f"{i+1}. {d}{' *' if d in existing_favs else ''}"
+            f"{i+1}. {escape(d)}{' *' if d in existing_favs else ''}"
             for i, d in enumerate(dishes)
         )
     )
@@ -4062,16 +4061,14 @@ Anleitung (kurz Schritt-für-Schritt):"""
             recipe_cache[cache_key] = steps
             save_json(CACHE_FILE, recipe_cache)
 
-        msg = f"""📖 Rezept für *{dish}* für *{personen}* Personen:
-
-*Zutaten:*
-{zut_text}
-
-*Zubereitungszeit:* ca. {time_str}
-
-*Anleitung:*
-{steps}"""
-        await update.message.reply_markdown(msg)
+        msg = (
+            f"📖 Rezept für <b>{escape(dish)}</b> für <b>{personen}</b> Personen:\n\n"
+            f"<b>Zutaten:</b>\n{escape(zut_text)}\n\n"
+            f"<b>Zubereitungszeit:</b> ca. {escape(time_str)}\n\n"
+            f"<b>Anleitung:</b>\n{escape(steps)}"
+        )
+        await update.message.reply_text(msg)
+        
         return ConversationHandler.END
 
     except Exception as e:
@@ -4105,7 +4102,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 def main():
     print("BUILD_MARK = FIX_WEBHOOK_", __import__("datetime").datetime.utcnow().isoformat())
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML, disable_web_page_preview=True)).build()
     cancel_handler = CommandHandler("cancel", cancel)
     reset_handler  = CommandHandler("reset", reset_command)
     app.add_handler(CommandHandler("start", start))
