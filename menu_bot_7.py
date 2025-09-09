@@ -3117,11 +3117,20 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Keine Einkaufsliste gefunden.")
         return ConversationHandler.END
 
-    # --- 1) JSON-LD aufbereiten -------------------------------------------
+    # --- 1) JSON-LD aufbereiten (nach Kategorie sortiert) -------------------
+    # Stabil sortieren: erst nach Kategorie, dann nach Zutat.
+    # Leere Kategorien als "Sonstiges" behandeln, damit die Sortierung deterministisch ist.
+    eink_sorted = (
+        eink.copy()
+        .assign(Kategorie=lambda d: d["Kategorie"].fillna("Sonstiges"))
+        .sort_values(["Kategorie", "Zutat"], kind="mergesort")
+    )
+
     recipe_ingredients = [
-        f"{format_amount(r.Menge)} {r.Einheit} {r.Zutat}"
-        for _, r in eink.iterrows()
+        (f"{format_amount(r.Menge)} {r.Einheit} {r.Zutat}").strip()
+        for _, r in eink_sorted.iterrows()
     ]
+
     recipe_jsonld = {
         "@context": "https://schema.org",
         "@type":    "Recipe",
