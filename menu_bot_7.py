@@ -977,12 +977,14 @@ def get_overview_text() -> str:
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
-        [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone")],
+        [
+            InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
+            InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
+        ],
         [
             InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
             InlineKeyboardButton("🛠️ Übersicht", callback_data="start_setup"),
-            InlineKeyboardButton("🔄 Restart",   callback_data="restart"),
+            InlineKeyboardButton("🔄 Restart",   callback_data="restart_ov"),
         ],
     ])
 
@@ -3481,43 +3483,56 @@ async def restart_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return RESTART_CONFIRM
 
 
-
-async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Restart-Bestätigung aus der ÜBERSICHT.
+    Wichtig: Übersicht NICHT editieren – neue Nachricht darunter posten.
+    """
     q = update.callback_query
     await q.answer()
     chat_id = q.message.chat.id
-    data = q.data
 
-    # Bestätigungsnachricht IMMER entfernen
+    confirm_text = pad_message("<b>Bist Du sicher, dass Du neu starten möchtest?</b>\nDas setzt den Vorgang zurück.")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Ja",   callback_data="restart_yes_ov"),
+        InlineKeyboardButton("Nein", callback_data="restart_no_ov"),
+    ]])
+
+    # Neue Nachricht senden (Übersicht bleibt stehen)
+    await context.bot.send_message(chat_id, confirm_text, reply_markup=kb)
+    return ConversationHandler.END
+
+
+async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Bestätigung für 'Das passt so. Neustart!' am Prozessende.
+    Erwartete callback_data: 'restart_yes' oder 'restart_no' (ohne _ov).
+    """
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat.id
+    data = q.data  # 'restart_yes' | 'restart_no'
+
+    # Bestätigungsnachricht entfernen
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
     except Exception:
         pass
 
-    yes = data.startswith("restart_yes")
-    from_overview = data.endswith("_ov")
-
-    if yes:
-        # Kurzer Abschiedsgruß -> löschen -> zurück zur Übersicht
-        bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-        await asyncio.sleep(1.0)
+    if data == "restart_yes":
+        # Kurzer Abschiedsgruß → löschen → danach zur Übersicht
         try:
+            bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
+            await asyncio.sleep(1.0)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
         except Exception:
             pass
 
-        # Einheitliche Übersicht (Text + Buttons)
         await send_overview(chat_id, context)
         return ConversationHandler.END
 
-    # NEIN-Fälle:
-    if from_overview:
-        # NEU: Nur die Frage gelöscht lassen und am gleichen Ort bleiben (Übersicht bleibt sichtbar)
-        return ConversationHandler.END
-
-    # Bisheriger Flow (NEIN nach Prozessende): Zurück ins Aktionsmenü
+    # data == "restart_no": zurück ins Aktionsmenü dieses Flows
     await send_action_menu(q.message)
     return EXPORT_OPTIONS
+
 
 
 
@@ -4206,7 +4221,8 @@ def main():
     app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
     app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
     app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_cb, pattern="^restart_yes$|^restart_no$"))
+    app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb, pattern="^restart_(yes|no)(_ov)?$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
     app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
     app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
