@@ -3557,7 +3557,8 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n"
         "❌ Favoriten aus Liste <b>entfernen</b>\n"
         "⏪ <b>Zurück</b> zum Hauptmenü\n",
-    reply_markup=kb
+        reply_markup=kb
+    )
     context.user_data["fav_msgs"].extend([m1.message_id, m2.message_id])
     return FAV_OVERVIEW
 
@@ -4300,17 +4301,24 @@ def main():
         print(f"▶️ Cloud Run Webhook auf :{port} → {webhook_url}")
 
         aio = web.Application()
+        aio.router.add_get("/", _health_route)
         aio.router.add_get("/webhook/health", _health_route)
         aio.router.add_post(path, _telegram_webhook)
 
         async def _on_startup(_app):
-            await app.initialize()
+            try:
+                await app.initialize()
+            except Exception as e:
+                print(f"❌ app.initialize() fehlgeschlagen: {e}")
+                # HTTP-Server trotzdem starten, damit Health/Logs verfügbar sind
+                return
             try:
                 await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
                 print("✅ set_webhook OK")
             except Exception as e:
                 print(f"⚠️ set_webhook failed: {e} — continuing without blocking startup")
             await app.start()
+
 
         async def _on_cleanup(_app):
             await app.stop()
