@@ -641,9 +641,9 @@ def distribute_buttons_equally(buttons, max_per_row=7):
 
 async def send_main_buttons(msg):
     """Hauptmenü-Buttons erneut anzeigen (z. B. bei leerer Favoritenliste)."""
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
-        InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone")],
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
+        [InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone")],
         [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
         InlineKeyboardButton("🛠️ Übersicht",     callback_data="start_setup"),
     ]])
@@ -958,27 +958,53 @@ def choose_sides(codes: list[int]) -> list[int]:
 #>>>>>>>>>>>>START / SETUP
 ##############################################
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Willkommen!\n"
+
+# ===== Zentrale Texte & UI für Start/Übersicht =====
+def get_welcome_text() -> str:
+    return (
+        "👋 Willkommen!\n\n"
+        "Hier ein paar Infos zum Bot:\n\n"
+        "Du kannst Vorschläge für leckere Gerichte erstellen. Nur 1 Gericht oder gleich mehrere für die ganze Woche. Die sortierte Einkaufsliste hilft Dir im Laden Zeit zu sparen.\n\n"
+            )
+def get_overview_text() -> str:
+    return (
         "Übersicht der Befehle:\n\n"
         "🍲 Menü – Lass Dir leckere Gerichte vorschlagen\n\n"
-        "⚡ QuickOne – Ein Gericht / Keine Einschränkungen\n\n"
+        "⚡ QuickOne – Ein Gericht ohne Einschränkungen\n\n"
         "🔖 Favoriten – Deine Favoriten\n\n"
         "🛠️ Übersicht – Alle Funktionen\n\n"
     )
 
-    # 2. Buttons in einer neuen Nachricht
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
-        InlineKeyboardButton("⚡QuickOne",     callback_data="start_quickone")],
-        [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
-        InlineKeyboardButton("🛠️ Übersicht",     callback_data="start_setup"),
-    ]])
-    await update.message.reply_text(
-        pad_message("➡️ Wähle eine Option:"),
-        reply_markup=keyboard
-    )
+def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
+        [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone")],
+        [
+            InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
+            InlineKeyboardButton("🛠️ Übersicht", callback_data="start_setup"),
+            InlineKeyboardButton("🔄 Restart",   callback_data="restart"),
+        ],
+    ])
+
+async def send_overview(chat_id: int, context: ContextTypes.DEFAULT_TYPE, edit_message=None):
+    text = get_overview_text()
+    kb = build_main_menu_keyboard()
+    if edit_message is not None:
+        await edit_message.edit_text(text, reply_markup=kb)
+    else:
+        await context.bot.send_message(chat_id, text, reply_markup=kb)
+
+async def send_welcome_then_overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    # 1) Sofort: kurzer Willkommens-Text
+    await context.bot.send_message(chat_id, get_welcome_text())
+    # 2) Nach 3 Sekunden: Übersicht + Buttons
+    await asyncio.sleep(3)
+    await send_overview(chat_id, context)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_welcome_then_overview(update, context)
 
 async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -2974,7 +3000,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         .sort_values(["Kategorie", "Zutat"])
     )
 
-    eink_text = f"\n<b><u>🛒 Einkaufsliste für {personen} Personen:</u></b>\n"
+    eink_text = f"\n<b>🛒 <u>Einkaufsliste für {personen} Personen:</u></b>\n"
     # nach Kategorie gruppieren
     for cat, group in eink.groupby("Kategorie"):
         emoji = CAT_EMOJI.get(cat, "")
@@ -2992,7 +3018,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
    
     # --- Kochliste mit Hauptgericht- und Beilagen-Zutaten in der richtigen Reihenfolge ---
-    koch_text = f"\n<b><u>🍽 Kochliste für {personen} Personen:</u></b>\n"
+    koch_text = f"\n<b>🍽 <u>Kochliste für {personen} Personen:</u></b>\n"
 
     for g in ausgew:
         # 1) Namen der gewählten Beilagen holen
@@ -3460,47 +3486,39 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     q = update.callback_query
     await q.answer()
     chat_id = q.message.chat.id
+    data = q.data
 
-    # 1) Lösche die Bestätigungs-Nachricht
+    # Bestätigungsnachricht IMMER entfernen
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-    except:
+    except Exception:
         pass
 
-    # 2) Bei "Ja": Abschied, kurze Pause, dann Start-Übersicht
-    if q.data == "restart_yes":
-        bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-        await asyncio.sleep(1)
+    yes = data.startswith("restart_yes")
+    from_overview = data.endswith("_ov")
 
-        # Abschieds-Nachricht entfernen
+    if yes:
+        # Kurzer Abschiedsgruß -> löschen -> zurück zur Übersicht
+        bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
+        await asyncio.sleep(1.0)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-        except:
+        except Exception:
             pass
 
-        overview = (
-            "Übersicht der Befehle:\n\n"
-            "🍲 Menü – Lass Dir leckere Gerichte vorschlagen\n\n"
-            "⚡ QuickOne – Ein Gericht / Keine Einschränkungen\n\n"
-            "🔖 Favoriten – Deine Favoriten\n\n"
-            "🛠️ Übersicht – Alle Funktionen"
-        )
-        await context.bot.send_message(chat_id, overview)
-
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🍲 Menü",      callback_data="restart_menu"),
-            InlineKeyboardButton("⚡ QuickOne",  callback_data="restart_quickone")],
-            [InlineKeyboardButton("🔖 Favoriten", callback_data="restart_favs"),
-            InlineKeyboardButton("🛠️ Übersicht", callback_data="restart_setup"),
-        ]])
-        await context.bot.send_message(chat_id, pad_message("Wähle eine Option:"), reply_markup=kb)
-
+        # Einheitliche Übersicht (Text + Buttons)
+        await send_overview(chat_id, context)
         return ConversationHandler.END
 
-    # 3) Bei "Nein": wie nach Export/Bring/Favoriten-Flow ins Aktions-Menu
-    #    ("Was möchtest Du weiter tun?" + Favoriten/Bring/PDF/Restart-Buttons)
+    # NEIN-Fälle:
+    if from_overview:
+        # NEU: Nur die Frage gelöscht lassen und am gleichen Ort bleiben (Übersicht bleibt sichtbar)
+        return ConversationHandler.END
+
+    # Bisheriger Flow (NEIN nach Prozessende): Zurück ins Aktionsmenü
     await send_action_menu(q.message)
     return EXPORT_OPTIONS
+
 
 
 
