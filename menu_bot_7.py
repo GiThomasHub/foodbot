@@ -3485,7 +3485,7 @@ async def restart_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Restart-Bestätigung aus der ÜBERSICHT.
-    Wichtig: Übersicht NICHT editieren – neue Nachricht darunter posten.
+    Wichtig: Übersicht NICHT editieren – neue Nachricht als Reply zur Übersicht posten.
     """
     q = update.callback_query
     await q.answer()
@@ -3497,9 +3497,16 @@ async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         InlineKeyboardButton("Nein", callback_data="restart_no_ov"),
     ]])
 
-    # Neue Nachricht senden (Übersicht bleibt stehen)
-    await context.bot.send_message(chat_id, confirm_text, reply_markup=kb)
+    # Neue Nachricht als REPLY auf die Übersicht senden (visuell „direkt darunter“ angehängt)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=confirm_text,
+        reply_markup=kb,
+        reply_to_message_id=q.message.message_id,
+        allow_sending_without_reply=True
+    )
     return ConversationHandler.END
+
 
 
 async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3533,6 +3540,35 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await send_action_menu(q.message)
     return EXPORT_OPTIONS
 
+async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Bestätigung für '🔄 Restart' aus der Übersicht.
+    Erwartete callback_data: 'restart_yes_ov' oder 'restart_no_ov'.
+    """
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat.id
+    data = q.data  # 'restart_yes_ov' | 'restart_no_ov'
+
+    # Bestätigungsfrage entfernen
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
+    except Exception:
+        pass
+
+    if data == "restart_yes_ov":
+        # kurzer Abschiedsgruß → wieder löschen → NEUE Übersicht unten posten
+        try:
+            bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
+            await asyncio.sleep(1.0)
+            await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+        except Exception:
+            pass
+
+        await send_overview(chat_id, context)  # neue Übersicht als letzte Nachricht
+        return ConversationHandler.END
+
+    # data == 'restart_no_ov' → nur die Frage war da → gelöscht, sonst nichts tun
+    return ConversationHandler.END
 
 
 
@@ -4222,7 +4258,8 @@ def main():
     app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
     app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
     app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_cb, pattern="^restart_(yes|no)(_ov)?$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
     app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
     app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
