@@ -507,6 +507,12 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     q = update.callback_query
     data = q.data if q else None
 
+    # Fresh entry (kein reiner Seitenwechsel): alte Auswahl löschen
+    if not (query and (data in ("persons_page_low", "persons_page_high"))):
+        context.user_data.pop("temp_persons", None)
+        context.user_data["persons_page"] = "low"
+
+
     # State: Seite & Auswahl (temp_persons hält die Auswahl bis 'Fertig')
     sel = context.user_data.get("temp_persons")
     if data in ("persons_page_low", "persons_page_high"):
@@ -1266,7 +1272,10 @@ async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low"):
     """Zahlenauswahl 1–12 mit Umschaltung und 'Fertig'. Auswahl nur markieren (✅),
     weiter geht es erst mit 'Fertig'."""
+    # Fresh entry (kein reiner Seitenwechsel): alte Auswahl löschen
     q = update.callback_query
+    if not (q and (q.data in ("menu_count_page_high", "menu_count_page_low"))):
+        context.user_data.pop("menu_count_sel", None)
     data = q.data if q else None
 
     # State: aktuelle Seite & Auswahl merken
@@ -1368,10 +1377,16 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_menu_count_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Startet den neuen Menü-Auswahl-Flow mit Buttons."""
+    """Startet den Menü-Auswahl-Flow (1–12) und setzt vorher jegliche alte Auswahl zurück."""
     await cleanup_prof_loop(context, update.effective_chat.id)
 
-    return await ask_menu_count(update, context)
+    # Alte Auswahl & Seite sicher zurücksetzen
+    for k in ("menu_count_sel", "menu_count"):
+        context.user_data.pop(k, None)
+    context.user_data["menu_count_page"] = "low"
+
+    return await ask_menu_count(update, context, page="low")
+
 
 
 async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1792,70 +1807,59 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 
-
-
-
-
-
-
-
 async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    await q.answer()
-    data = q.data
+    query = update.callback_query
+    await query.answer()
+    data = query.data
 
     # 1) Seitenwechsel
     if data in ("persons_page_low", "persons_page_high"):
-        return await ask_for_persons(update, context, page="high" if data.endswith("high") else "low")
+        return await ask_for_persons(update, context, page="high" if data == "persons_page_high" else "low")
 
-    # 2) Zahl gewählt -> nur markieren (✅), nicht fortfahren
+    # 2) Zahl gewählt -> nur markieren (✅), noch NICHT weiter
     if data.startswith("persons_") and data != "persons_done":
         try:
             sel = int(data.split("_")[1])
         except Exception:
             return PERSONS_SELECTION
 
-        context.user_data["temp_persons"] = sel  # Auswahl merken
+        context.user_data["temp_persons"] = sel
 
-        # Tastatur mit ✅ neu aufbauen (Layout unverändert)
+        # Tastatur mit Haken neu aufbauen (Layout unverändert)
         page = context.user_data.get("persons_page", "low")
         if page == "low":
-            nums = range(1, 7)
-            nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="persons_page_high")
+            nums = list(range(1, 7))
+            nav_label, nav_data = "Mehr ➡️", "persons_page_high"
         else:
-            nums = range(7, 13)
-            nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="persons_page_low")
+            nums = list(range(7, 13))
+            nav_label, nav_data = "⬅️ Weniger", "persons_page_low"
 
         row_numbers = [
             InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
             for n in nums
         ]
-        footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="persons_done")]
-        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
+        footer = [
+            InlineKeyboardButton(nav_label, callback_data=nav_data),
+            InlineKeyboardButton("✅ Fertig", callback_data="persons_done"),
+        ]
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
         return PERSONS_SELECTION
 
-    # 3) Fertig -> weiter
+    # 3) Fertig -> jetzt weiter
     if data == "persons_done":
         sel = context.user_data.get("temp_persons")
         if not isinstance(sel, int):
-            await q.answer("Bitte zuerst eine Zahl auswählen.", show_alert=True)
+            await query.answer("Bitte zuerst eine Zahl auswählen.", show_alert=True)
             return PERSONS_SELECTION
 
-        # Frage-Nachricht entfernen
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            try:
-                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_id)
-            except Exception:
-                pass
+        # Auswahl als finale Personenanzahl übernehmen
+        context.user_data["personen"] = sel
 
-        # fertig_input() liest temp_persons und rechnet weiter
+        # Weiter mit deinem bestehenden nächsten Schritt:
+        # In deinem Code ist das bereits so gelöst:
         return await fertig_input(update, context)
 
     return PERSONS_SELECTION
-
-
 
 
 async def persons_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4273,7 +4277,7 @@ def main():
             ASK_SHOW_LIST:   [CallbackQueryHandler(ask_showlist_cb)],
             PERSONS_SELECTION: [
                         CallbackQueryHandler(persons_selection_cb, pattern="^persons_page_(low|high)$"),
-                        CallbackQueryHandler(persons_selection_cb, pattern="^persons_\\d+$"),
+                        CallbackQueryHandler(persons_selection_cb, pattern="^persons_(\d+|done)$"),
             ],
             PERSONS_MANUAL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, persons_manual_cb)],
             TAUSCHE_SELECT:  [CallbackQueryHandler(tausche_select_cb,   pattern=r"^swap_(sel:\d+|done)$")],
