@@ -508,17 +508,18 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     data = q.data if q else None
 
     # Fresh entry (kein reiner Seitenwechsel): alte Auswahl löschen
-    if not (query and (data in ("persons_page_low", "persons_page_high"))):
+    if not (q and data in ("persons_page_low", "persons_page_high")):
         context.user_data.pop("temp_persons", None)
-        context.user_data["persons_page"] = "low"
 
-
-    # State: Seite & Auswahl (temp_persons hält die Auswahl bis 'Fertig')
-    sel = context.user_data.get("temp_persons")
+    # Seite bestimmen & merken
     if data in ("persons_page_low", "persons_page_high"):
         page = "high" if data == "persons_page_high" else "low"
     context.user_data["persons_page"] = page
 
+    # Aktuelle (temporäre) Auswahl für Häkchen
+    sel = context.user_data.get("temp_persons")
+
+    # Zahlen & Navigation je Seite
     if page == "low":
         nums = range(1, 7)
         nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="persons_page_high")
@@ -532,6 +533,7 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     ]
     footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="persons_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
+
     prompt = "Für wieviel Personen soll die Einkaufs- und Kochliste erstellt werden?"
 
     # a) Bei echtem Seitenwechsel nur das Keyboard updaten
@@ -540,9 +542,17 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         return PERSONS_SELECTION
 
     # b) Initial/sonst: neue Nachricht senden
-    msg = await update.effective_message.reply_text(prompt, reply_markup=kb)
+    if q:
+        msg = await q.message.reply_text(prompt, reply_markup=kb)
+    elif update.message:
+        msg = await update.message.reply_text(prompt, reply_markup=kb)
+    else:
+        chat_id = update.effective_chat.id
+        msg = await context.bot.send_message(chat_id=chat_id, text=prompt, reply_markup=kb)
+
     context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     return PERSONS_SELECTION
+
 
 
 
