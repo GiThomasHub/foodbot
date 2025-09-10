@@ -599,18 +599,16 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     data = q.data if q else None
 
     # Fresh entry (kein reiner Seitenwechsel): alte Auswahl löschen
-    if not (q and data in ("persons_page_low", "persons_page_high")):
+    if not (q and (data in ("persons_page_low", "persons_page_high"))):
         context.user_data.pop("temp_persons", None)
+        context.user_data["persons_page"] = "low"
 
-    # Seite bestimmen & merken
+    # State: Seite & Auswahl (temp_persons hält die Auswahl bis 'Fertig')
+    sel = context.user_data.get("temp_persons")
     if data in ("persons_page_low", "persons_page_high"):
         page = "high" if data == "persons_page_high" else "low"
     context.user_data["persons_page"] = page
 
-    # Aktuelle (temporäre) Auswahl für Häkchen
-    sel = context.user_data.get("temp_persons")
-
-    # Zahlen & Navigation je Seite
     if page == "low":
         nums = range(1, 7)
         nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="persons_page_high")
@@ -622,9 +620,9 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
         for n in nums
     ]
-    footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="persons_done")]
+    done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+    footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="persons_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
-
     prompt = "Für wieviel Personen soll die Einkaufs- und Kochliste erstellt werden?"
 
     # a) Bei echtem Seitenwechsel nur das Keyboard updaten
@@ -633,16 +631,10 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         return PERSONS_SELECTION
 
     # b) Initial/sonst: neue Nachricht senden
-    if q:
-        msg = await q.message.reply_text(prompt, reply_markup=kb)
-    elif update.message:
-        msg = await update.message.reply_text(prompt, reply_markup=kb)
-    else:
-        chat_id = update.effective_chat.id
-        msg = await context.bot.send_message(chat_id=chat_id, text=prompt, reply_markup=kb)
-
+    msg = await update.effective_message.reply_text(prompt, reply_markup=kb)
     context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     return PERSONS_SELECTION
+
 
 
 
@@ -1372,8 +1364,8 @@ async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low"):
     """Zahlenauswahl 1–12 mit Umschaltung und 'Fertig'. Auswahl nur markieren (✅),
-    weiter geht es erst mit 'Fertig'."""
-    # Fresh entry (kein reiner Seitenwechsel): alte Auswahl löschen
+    weiter geht es erst mit 'Fertig'. Der 'Fertig'-Button zeigt einen grünen Haken,
+    sobald eine Zahl gewählt ist."""
     q = update.callback_query
     if not (q and (q.data in ("menu_count_page_high", "menu_count_page_low"))):
         context.user_data.pop("menu_count_sel", None)
@@ -1397,7 +1389,8 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
         InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
         for n in nums
     ]
-    footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="menu_count_done")]
+    done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+    footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
     text = "Wie viele Menüs möchtest du?"
 
@@ -1408,7 +1401,6 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
 
     # b) Initial oder sonst: Nachricht mit Tastatur senden/editen (Layout bleibt gleich)
     if q:
-        # Ersteintritt über Callback (z. B. aus Profil): neue Nachricht antworten
         msg = await q.message.reply_text(text, reply_markup=kb)
         context.user_data["flow_msgs"] = [msg.message_id]
     elif update.message:
@@ -1420,7 +1412,6 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
         context.user_data["flow_msgs"] = [msg.message_id]
 
     return MENU_COUNT
-
 
 
 async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1453,7 +1444,8 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
             for n in nums
         ]
-        footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="menu_count_done")]
+        done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+        footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
         await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
         return MENU_COUNT
 
@@ -1473,6 +1465,7 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MENU_AUFWAND
 
     return MENU_COUNT
+
 
 
 async def start_menu_count_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1853,7 +1846,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Nur die bisherige Flow-UI löschen (Session bleibt)
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-            text = "🥣 Deine finale Liste:\n"
+            text = "🥣 Deine Auswahl:\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
@@ -1917,9 +1910,10 @@ async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
             for n in nums
         ]
+        done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
         footer = [
             InlineKeyboardButton(nav_label, callback_data=nav_data),
-            InlineKeyboardButton("✅ Fertig", callback_data="persons_done"),
+            InlineKeyboardButton(done_label, callback_data="persons_done"),
         ]
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
         return PERSONS_SELECTION
@@ -1934,8 +1928,7 @@ async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         # Auswahl als finale Personenanzahl übernehmen
         context.user_data["personen"] = sel
 
-        # Weiter mit deinem bestehenden nächsten Schritt:
-        # In deinem Code ist das bereits so gelöst:
+        # weiter im Flow:
         return await fertig_input(update, context)
 
     return PERSONS_SELECTION
@@ -2491,7 +2484,7 @@ def build_aufwand_keyboard(verteilung: dict, total: int) -> InlineKeyboardMarkup
 
     summe = sum(verteilung.values())
     if summe == total:
-        rows.append([InlineKeyboardButton("✔️ Weiter", callback_data="aufwand_done")])
+        rows.append([InlineKeyboardButton("✅ Weiter", callback_data="aufwand_done")])
     else:
         rows.append([InlineKeyboardButton(f"{summe}/{total} gewählt", callback_data="noop")])
 
@@ -3142,29 +3135,24 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---- Flow-UI aufräumen (nur flow_msgs) ----
     await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-    # ---- Einkaufs- & Kochliste senden ----
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=koch_text + eink_text,
-        parse_mode="HTML",
-        disable_web_page_preview=True
-    )
-
     # ---- Für Exporte merken ----
     context.user_data["einkaufsliste_df"] = eink
     context.user_data["kochliste_text"]   = koch_text
+    
+    # — Einkaufs- & Kochliste senden + Export-Buttons an dieselbe Nachricht —
 
-    # ---- Aktions-Buttons senden ----
     keyboard = InlineKeyboardMarkup([
         [ InlineKeyboardButton("🔖 Gerichte zu Favoriten hinzufügen", callback_data="favoriten") ],
         [ InlineKeyboardButton("🛒 Einkaufsliste in Bring! exportieren", callback_data="export_bring") ],
         [ InlineKeyboardButton("📄 Als PDF exportieren", callback_data="export_pdf") ],
         [ InlineKeyboardButton("🔄 Das passt so. Neustart!", callback_data="restart") ],
     ])
+
     await context.bot.send_message(
         chat_id=chat_id,
-        text="Deine Listen sind bereit – was möchtest du tun?",
+        text=koch_text + eink_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
         reply_markup=keyboard
     )
 
