@@ -620,7 +620,7 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
         for n in nums
     ]
-    done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+    done_label = "✔️ Fertig" if isinstance(sel, int) else "Fertig"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="persons_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
     prompt = "Für wieviel Personen soll die Einkaufs- und Kochliste erstellt werden?"
@@ -1389,7 +1389,7 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
         InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
         for n in nums
     ]
-    done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+    done_label = "✔️ Fertig" if isinstance(sel, int) else "Fertig"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
     text = "Wie viele Menüs möchtest du?"
@@ -1444,7 +1444,7 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
             for n in nums
         ]
-        done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+        done_label = "✔️ Fertig" if isinstance(sel, int) else "Fertig"
         footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
         await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
         return MENU_COUNT
@@ -1910,7 +1910,7 @@ async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
             for n in nums
         ]
-        done_label = "✅ Fertig" if isinstance(sel, int) else "Fertig"
+        done_label = "✔️ Fertig" if isinstance(sel, int) else "Fertig"
         footer = [
             InlineKeyboardButton(nav_label, callback_data=nav_data),
             InlineKeyboardButton(done_label, callback_data="persons_done"),
@@ -2275,7 +2275,7 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("⚠️ Keine Menüs ausgewählt. Abbruch.")
             return ConversationHandler.END
         context.user_data["to_process"] = sorted(i-1 for i in sel)  # in 0-basiert
-        context.user_data["to_process"] = sorted(sel)
+        #context.user_data["to_process"] = sorted(sel)                                     #herausgenommen am 10/09 aufgrund *Nebenfix". falls nciht geht, wieder reinnehmen
         context.user_data["menu_idx"] = 0
         return await ask_beilagen_for_menu(query, context)
 
@@ -3013,6 +3013,7 @@ async def fertig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_session_loaded_for_user_and_chat(update)
     user_id = str(update.effective_user.id)
+    chat_id = update.effective_chat.id
 
     # Personenzahl: Buttons (temp_persons) bevorzugen, sonst Text
     if "temp_persons" in context.user_data:
