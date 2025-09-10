@@ -501,56 +501,43 @@ def pad_message(text: str, min_width: int = 35) -> str:
 
 async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low") -> int:
     """
-    Paginiertes Auswahl-Keyboard für 1–6 / 7–12 Personen.
-    Nur bei den Navigation-Callback-Daten wird die Inline-ReplyMarkup editiert,
-    ansonsten immer eine neue Nachricht gesendet.
+    Paginiertes Auswahl-Keyboard für 1–6 / 7–12 Personen mit 'Fertig'.
+    Zahl klickt nur Auswahl (✅), weiter geht es erst mit 'Fertig'.
     """
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    data = query.data if query else None
+    q = update.callback_query
+    data = q.data if q else None
 
-    # 1) Nur bei echten Page-Wechseln editen
-    if query and data in ("persons_page_low", "persons_page_high"):
-        # Seite umschalten
+    # State: Seite & Auswahl (temp_persons hält die Auswahl bis 'Fertig')
+    sel = context.user_data.get("temp_persons")
+    if data in ("persons_page_low", "persons_page_high"):
         page = "high" if data == "persons_page_high" else "low"
+    context.user_data["persons_page"] = page
 
-        # Buttons je nach Seite
-        if page == "low":
-            nums = list(range(1, 7))
-            nav_label, nav_data = "Mehr ➡️", "persons_page_high"
-        else:
-            nums = list(range(7, 13))
-            nav_label, nav_data = "⬅️ Weniger", "persons_page_low"
+    if page == "low":
+        nums = range(1, 7)
+        nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="persons_page_high")
+    else:
+        nums = range(7, 13)
+        nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="persons_page_low")
 
-        # Grid-Layout: 6 Zahlen in einer Zeile + Navigations-Button darunter
-        num_buttons = [
-            [InlineKeyboardButton(str(n), callback_data=f"persons_{n}") for n in nums]
-        ]
-        num_buttons.append([InlineKeyboardButton(nav_label, callback_data=nav_data)])
+    row_numbers = [
+        InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
+        for n in nums
+    ]
+    footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="persons_done")]
+    kb = InlineKeyboardMarkup([row_numbers, footer])
+    prompt = "Für wieviel Personen soll die Einkaufs- und Kochliste erstellt werden?"
 
-        kb = InlineKeyboardMarkup(num_buttons)
-
-        # Nur das Keyboard editieren
-        await query.edit_message_reply_markup(reply_markup=kb)
+    # a) Bei echtem Seitenwechsel nur das Keyboard updaten
+    if q and data in ("persons_page_low", "persons_page_high"):
+        await q.edit_message_reply_markup(reply_markup=kb)
         return PERSONS_SELECTION
 
-    # 2) Andernfalls (Erstversand oder Aufruf von menu_confirm_cb etc.) neu senden
-    # Immer mit der "low"-Seite starten
-    nums = list(range(1, 7))
-    nav_label, nav_data = "Mehr ➡️", "persons_page_high"
-    num_buttons = [
-        [InlineKeyboardButton(str(n), callback_data=f"persons_{n}") for n in nums]
-    ]
-    num_buttons.append([InlineKeyboardButton(nav_label, callback_data=nav_data)])
-    
-    kb = InlineKeyboardMarkup(num_buttons)
-
-    msg = await update.effective_message.reply_text(
-        "Für wieviel Personen soll die Einkaufs- und Kochliste erstellt werden?",
-        reply_markup=kb
-    )
+    # b) Initial/sonst: neue Nachricht senden
+    msg = await update.effective_message.reply_text(prompt, reply_markup=kb)
     context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     return PERSONS_SELECTION
+
 
 
 
@@ -1277,35 +1264,46 @@ async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low"):
-    """Zeigt dem Nutzer Menümengen zur Auswahl (1–12) mit Umschaltung."""
+    """Zahlenauswahl 1–12 mit Umschaltung und 'Fertig'. Auswahl nur markieren (✅),
+    weiter geht es erst mit 'Fertig'."""
+    q = update.callback_query
+    data = q.data if q else None
 
+    # State: aktuelle Seite & Auswahl merken
+    sel = context.user_data.get("menu_count_sel")
+    if data in ("menu_count_page_high", "menu_count_page_low"):
+        page = "high" if data == "menu_count_page_high" else "low"
+    context.user_data["menu_count_page"] = page
+
+    # Zahlen & Navigation je Seite
     if page == "low":
-        count_buttons = [InlineKeyboardButton(str(i), callback_data=f"menu_count_{i}") for i in range(1, 7)]
-        nav_button = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
+        nums = range(1, 7)
+        nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
     else:
-        count_buttons = [InlineKeyboardButton(str(i), callback_data=f"menu_count_{i}") for i in range(7, 13)]
-        nav_button = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
+        nums = range(7, 13)
+        nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
 
-    rows = [count_buttons]
-    rows.append([nav_button])
-    kb = InlineKeyboardMarkup(rows)
-
+    row_numbers = [
+        InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
+        for n in nums
+    ]
+    footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="menu_count_done")]
+    kb = InlineKeyboardMarkup([row_numbers, footer])
     text = "Wie viele Menüs möchtest du?"
 
-    if update.callback_query:
-        data = update.callback_query.data
-        if data in ["menu_count_page_high", "menu_count_page_low"]:
-            # Navigation: Editiere vorhandene Nachricht
-            await update.callback_query.message.edit_text(text, reply_markup=kb)
-        else:
-            # Kein Navigationsevent: sende neu (z. B. Ersteintritt)
-            msg = await update.callback_query.message.reply_text(text, reply_markup=kb)
-            context.user_data["flow_msgs"] = [msg.message_id]
+    # a) Bei echtem Seitenwechsel: nur ReplyMarkup editen
+    if q and data in ("menu_count_page_high", "menu_count_page_low"):
+        await q.edit_message_reply_markup(reply_markup=kb)
+        return MENU_COUNT
 
+    # b) Initial oder sonst: Nachricht mit Tastatur senden/editen (Layout bleibt gleich)
+    if q:
+        # Ersteintritt über Callback (z. B. aus Profil): neue Nachricht antworten
+        msg = await q.message.reply_text(text, reply_markup=kb)
+        context.user_data["flow_msgs"] = [msg.message_id]
     elif update.message:
         msg = await update.message.reply_text(text, reply_markup=kb)
         context.user_data["flow_msgs"] = [msg.message_id]
-
     else:
         chat_id = update.effective_chat.id
         msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
@@ -1315,31 +1313,57 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
 
 
 
-
-
-
 async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+    q = update.callback_query
+    await q.answer()
+    data = q.data
 
-    if data == "menu_count_page_high":
-        return await ask_menu_count(update, context, page="high")
-    elif data == "menu_count_page_low":
-        return await ask_menu_count(update, context, page="low")
-    elif data.startswith("menu_count_"):
+    # 1) Seitenwechsel
+    if data in ("menu_count_page_high", "menu_count_page_low"):
+        return await ask_menu_count(update, context, page="high" if data.endswith("high") else "low")
+
+    # 2) Zahl angeklickt -> nur markieren (✅), nicht fortfahren
+    if data.startswith("menu_count_") and data != "menu_count_done":
         try:
-            count = int(data.split("_")[-1])
+            sel = int(data.rsplit("_", 1)[-1])
         except ValueError:
             return MENU_COUNT
+        context.user_data["menu_count_sel"] = sel
 
-        context.user_data["menu_count"] = count
+        # Tastatur mit ✅ neu aufbauen (Layout unverändert)
+        page = context.user_data.get("menu_count_page", "low")
+        if page == "low":
+            nums = range(1, 7)
+            nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
+        else:
+            nums = range(7, 13)
+            nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
+
+        row_numbers = [
+            InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
+            for n in nums
+        ]
+        footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="menu_count_done")]
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
+        return MENU_COUNT
+
+    # 3) Fertig -> jetzt geht's weiter
+    if data == "menu_count_done":
+        sel = context.user_data.get("menu_count_sel")
+        if not isinstance(sel, int):
+            await q.answer("Bitte zuerst eine Zahl auswählen.", show_alert=True)
+            return MENU_COUNT
+
+        context.user_data["menu_count"] = sel
         context.user_data["aufwand_verteilung"] = {"light": 0, "medium": 0, "heavy": 0}
-        await query.message.edit_text(
-            f"Du suchst <b>{count}</b> Gerichte ✅\nDefiniere deren Aufwand:",
-            reply_markup=build_aufwand_keyboard(context.user_data["aufwand_verteilung"], count)
+        await q.message.edit_text(
+            f"Du suchst <b>{sel}</b> Gerichte ✅\nDefiniere deren Aufwand:",
+            reply_markup=build_aufwand_keyboard(context.user_data["aufwand_verteilung"], sel)
         )
         return MENU_AUFWAND
+
+    return MENU_COUNT
+
 
 
 
@@ -1776,37 +1800,60 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+    q = update.callback_query
+    await q.answer()
+    data = q.data
 
     # 1) Seitenwechsel
     if data in ("persons_page_low", "persons_page_high"):
-        return await ask_for_persons(update, context, page="high" if data=="persons_page_high" else "low")
+        return await ask_for_persons(update, context, page="high" if data.endswith("high") else "low")
 
-    # 2) Echte Personenzahl gewählt
-    if data.startswith("persons_"):
-        # a) alte Frage-Nachricht löschen
+    # 2) Zahl gewählt -> nur markieren (✅), nicht fortfahren
+    if data.startswith("persons_") and data != "persons_done":
+        try:
+            sel = int(data.split("_")[1])
+        except Exception:
+            return PERSONS_SELECTION
+
+        context.user_data["temp_persons"] = sel  # Auswahl merken
+
+        # Tastatur mit ✅ neu aufbauen (Layout unverändert)
+        page = context.user_data.get("persons_page", "low")
+        if page == "low":
+            nums = range(1, 7)
+            nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="persons_page_high")
+        else:
+            nums = range(7, 13)
+            nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="persons_page_low")
+
+        row_numbers = [
+            InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
+            for n in nums
+        ]
+        footer = [nav_btn, InlineKeyboardButton("✅ Fertig", callback_data="persons_done")]
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
+        return PERSONS_SELECTION
+
+    # 3) Fertig -> weiter
+    if data == "persons_done":
+        sel = context.user_data.get("temp_persons")
+        if not isinstance(sel, int):
+            await q.answer("Bitte zuerst eine Zahl auswählen.", show_alert=True)
+            return PERSONS_SELECTION
+
+        # Frage-Nachricht entfernen
         flow = context.user_data.get("flow_msgs", [])
         if flow:
             last_id = flow.pop()
             try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=last_id
-                )
-            except:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_id)
+            except Exception:
                 pass
 
-        # b) Auswahl speichern
-        count = int(data.split("_")[1])
-        context.user_data["temp_persons"] = count
-
-        # c) Weiter zum Abschluss-Input
+        # fertig_input() liest temp_persons und rechnet weiter
         return await fertig_input(update, context)
 
-    # Fallback
-    return ConversationHandler.END
+    return PERSONS_SELECTION
 
 
 
@@ -3608,8 +3655,12 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["fav_msgs"] = []
 
     if not favs:
-        await msg.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
-        await send_main_buttons(msg)
+        warn = await msg.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
+        await asyncio.sleep(2)
+        try:
+            await context.bot.delete_message(chat_id=msg.chat.id, message_id=warn.message_id)
+        except:
+            pass
         return ConversationHandler.END
 
     # Übersicht senden und ID speichern
@@ -3888,9 +3939,14 @@ async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # falls leer → Hauptmenü & Ende
     if not favs:
-        await q.message.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
-        await send_main_buttons(q.message)
+        warn = await q.message.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
+        await asyncio.sleep(2)
+        try:
+            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=warn.message_id)
+        except:
+            pass
         return ConversationHandler.END
+
 
     # sonst neue Übersicht + Ja/Nein, IDs neu setzen
     txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {escape(d)}" for d in favs)
