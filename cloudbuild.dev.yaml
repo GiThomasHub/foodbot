@@ -25,7 +25,7 @@ steps:
       - --image=europe-west6-docker.pkg.dev/$PROJECT_ID/foodbot/foodbot:$SHORT_SHA
       - --region=europe-west6
       - --allow-unauthenticated
-      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY_DEV:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_DEV:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON_DEV:latest,OPENAI_API_KEY=OPENAI_API_KEY_DEV:latest
+      - --set-secrets=TELEGRAM_API_KEY=TELEGRAM_API_KEY_DEV:latest,TELEGRAM_WEBHOOK_SECRET=TELEGRAM_WEBHOOK_SECRET_DEV:latest,GOOGLE_CRED_JSON=GOOGLE_CRED_JSON_DEV:latest,OPENAI_API_KEY=OPENAI_API_KEY_DEV:latest,GITHUB_TOKEN=GITHUB_TOKEN_DEV:latest
       - --set-env-vars=SHEETS_CACHE_NAMESPACE=dev,PERSISTENCE=firestore
       - --concurrency=2
       - --cpu=2
