@@ -1,44 +1,20 @@
-import os
-import re
-import json
-import random
-import pandas as pd
-import gspread
+import os, re, json, random, math, asyncio, base64, gzip, time, logging
 import warnings
-import requests                                                 #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
-import urllib.request
-import logging
-import base64, gzip, time
-import httpx
-import math
-import asyncio
-from aiohttp import web
 from html import escape, unescape
 from datetime import datetime
-from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler    #HTTPServer könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from collections import Counter
-from fpdf import FPDF                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
-from fpdf.enums import XPos, YPos
+
+import pandas as pd
+import gspread
+import httpx
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
-from typing import Set                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from decimal import Decimal, ROUND_HALF_UP
+
 from google.cloud import firestore
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-import telegram
-from telegram.constants import ChatAction, ParseMode        #ChatAction und ParseMode könnten gelöscht werden -> ausprobieren wenn mal zeit besteht
-from telegram.helpers import escape_markdown                #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
-from persistence import (
-    user_key,
-    get_profile as store_get_profile, set_profile as store_set_profile,
-    get_favorites as store_get_favorites, set_favorites as store_set_favorites,
-    # Neu für Sessions (pro Chat):
-    chat_key,
-    get_session as store_get_session, set_session as store_set_session, delete_session as store_delete_session,
-)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -49,7 +25,14 @@ from telegram.ext import (
     CallbackQueryHandler,
     Defaults,
 )
+from telegram.constants import ParseMode
 from telegram.warnings import PTBUserWarning
+
+from fpdf import FPDF
+from fpdf.enums import XPos, YPos
+
+import urllib.request
+
 
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 
@@ -75,48 +58,6 @@ HTTPX_CLIENT  = httpx.AsyncClient(timeout=HTTPX_TIMEOUT, limits=HTTPX_LIMITS, fo
 MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SHOW_LIST, FERTIG_PERSONEN, REZEPT_INDEX, REZEPT_PERSONEN, TAUSCHE_SELECT, TAUSCHE_CONFIRM, ASK_CONFIRM, EXPORT_OPTIONS, FAV_OVERVIEW, FAV_DELETE_SELECT, PDF_EXPORT_CHOICE, FAV_ADD_SELECT, RESTART_CONFIRM, PROFILE_CHOICE, PROFILE_NEW_A, PROFILE_NEW_B, PROFILE_NEW_C, PROFILE_OVERVIEW, QUICKONE_START, QUICKONE_CONFIRM, PERSONS_SELECTION, PERSONS_MANUAL, MENU_COUNT, MENU_AUFWAND = range(29)
 
 # HELPER:
-
-# === Cloud Run: Health + Telegram Webhook via aiohttp ===
-def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
-    from aiohttp import web
-    from telegram import Update
-
-    async def _health(_req):
-        return web.Response(text="OK", status=200)
-
-    async def _tg_webhook(req):
-        try:
-            data = await req.json()
-        except Exception:
-            return web.Response(text="bad json", status=400)
-        upd = Update.de_json(data, app.bot)
-        await app.process_update(upd)
-        return web.Response(text="OK", status=200)
-
-    aio = web.Application()
-    aio.router.add_get("/webhook/health", _health)
-    aio.router.add_post(f"/{url_path}", _tg_webhook)
-
-    async def _on_startup(_):
-        await app.initialize()
-        try:
-            await app.bot.set_webhook(url=webhook_url, secret_token=secret_token)
-            print("✅ set_webhook OK")
-        except Exception as e:
-            print(f"⚠️ set_webhook failed: {e} — continuing")
-        await app.start()
-
-    async def _on_cleanup(_):
-        await app.stop()
-        await app.shutdown()
-        try:
-            await HTTPX_CLIENT.aclose()
-        except Exception:
-            pass
-
-    aio.on_startup.append(_on_startup)
-    aio.on_cleanup.append(_on_cleanup)
-    web.run_app(aio, host="0.0.0.0", port=port)
 
 
 def _compute_base_url():
@@ -244,16 +185,6 @@ def show_debug_for(update: Update) -> bool:
     ADMIN_IDS = {7650843881}  # in telegram @userinfobot ersichtlich
     return update.effective_user.id in ADMIN_IDS
 
-
-def load_json(path):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
@@ -875,6 +806,36 @@ df_gerichte["Typ"] = (
       .fillna("2")
 )
 
+# --- Precomputed lookups (O(1) statt DataFrame-Scans) ---
+df_beilagen["Nummer"] = pd.to_numeric(df_beilagen["Nummer"], errors="coerce").astype("Int64").fillna(0).astype(int)
+
+BEIL_NUM_TO_NAME = dict(zip(df_beilagen["Nummer"], df_beilagen["Beilagen"]))
+BEIL_NUM_TO_CAT  = dict(zip(df_beilagen["Nummer"], df_beilagen["Kategorie"]))
+BEIL_CAT_TO_NUMS = {
+    "Kohlenhydrate": df_beilagen.loc[df_beilagen["Kategorie"] == "Kohlenhydrate", "Nummer"].tolist(),
+    "Gemüse":        df_beilagen.loc[df_beilagen["Kategorie"] == "Gemüse",        "Nummer"].tolist(),
+}
+
+_DISH_IDX        = df_gerichte.set_index("Gericht", drop=False)
+DISH_TO_AUFWAND  = _DISH_IDX["Aufwand"].astype(int).to_dict()
+DISH_TO_TYP_STR  = _DISH_IDX["Typ"].astype(str).to_dict()
+DISH_TO_LINK     = _DISH_IDX["Link"].astype(str).fillna("").to_dict()
+DISH_TO_GEWICHT  = pd.to_numeric(_DISH_IDX["Gewicht"], errors="coerce").fillna(1.0).astype(float).to_dict()
+
+def _parse_codes_series(s: pd.Series) -> dict[str, list[int]]:
+    out = {}
+    for dish, raw in zip(s.index, s.values):
+        try:
+            codes = [int(x.strip()) for x in str(raw).split(",") if x.strip().isdigit()]
+            codes = [c for c in codes if c != 0]
+        except Exception:
+            codes = []
+        out[dish] = codes
+    return out
+
+DISH_TO_BEIL_CODES = _parse_codes_series(_DISH_IDX["Beilagen"])
+
+
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
 # -------------------------------------------------
@@ -998,38 +959,30 @@ def choose_random_dish() -> str:
     return df_gerichte.sample(1)["Gericht"].iloc[0]
 
 def choose_sides(codes: list[int]) -> list[int]:
-    """Beilagen basierend auf Codes zufällig auswählen, ohne Fehler bei leeren Kategorien."""
-    # Listen der Beilagen-Nummern
-    kh = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].astype(int).tolist()
-    gv = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].astype(int).tolist()
-
+    """Beilagen basierend auf Codes zufällig auswählen (Lookup-gestützt)."""
     sides = []
 
-    # 99: 1× KH + 1× Gemüse (sofern verfügbar)
+    kh = BEIL_CAT_TO_NUMS["Kohlenhydrate"]
+    gv = BEIL_CAT_TO_NUMS["Gemüse"]
+
     if 99 in codes:
-        if kh:
-            sides.append(random.choice(kh))
-        if gv:
-            sides.append(random.choice(gv))
+        if kh: sides.append(random.choice(kh))
+        if gv: sides.append(random.choice(gv))
         return sides
 
-    # 88: 1× KH
     if 88 in codes:
-        if kh:
-            sides.append(random.choice(kh))
+        if kh: sides.append(random.choice(kh))
         return sides
 
-    # 77: 1× Gemüse
     if 77 in codes:
-        if gv:
-            sides.append(random.choice(gv))
+        if gv: sides.append(random.choice(gv))
         return sides
 
-    # spezifische Nummern: nur aus gültigem Bereich wählen
-    valid = [c for c in codes if c in df_beilagen["Nummer"].astype(int).tolist()]
+    valid = [c for c in codes if c in BEIL_NUM_TO_NAME]
     if valid:
         sides.append(random.choice(valid))
     return sides
+
 
 
 
@@ -1515,13 +1468,8 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 selected = random.sample(selected, total)
 
             # Aufwand für die ausgewählten Favoriten aus df_gerichte extrahieren
-            selected_aufwand = []
-            for g in selected:
-                match = df_gerichte[df_gerichte["Gericht"] == g]
-                if not match.empty:
-                    selected_aufwand.append(int(match.iloc[0]["Aufwand"]))
-                else:
-                    selected_aufwand.append(2)  # Default, falls Gericht nicht gefunden
+            selected_aufwand = [int(DISH_TO_AUFWAND.get(g, 2)) for g in selected]
+
 
             # Initial: Nur Favoriten verwenden
             final_gerichte = selected.copy()
@@ -1566,13 +1514,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
                 # Aufwand der extra Gerichte aus df_gerichte
-                extra_aufwand = []
-                for g in extra:
-                    match = df_gerichte[df_gerichte["Gericht"] == g]
-                    if not match.empty:
-                        extra_aufwand.append(int(match.iloc[0]["Aufwand"]))
-                    else:
-                        extra_aufwand.append(2)
+                extra_aufwand = [int(DISH_TO_AUFWAND.get(g, 2)) for g in extra]
 
                 final_gerichte.extend(extra)
                 final_aufwand.extend(extra_aufwand)
@@ -1834,12 +1776,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
-        side_menus = []
-        for idx, dish in enumerate(menus):
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = [c for c in parse_codes(raw) if c != 0]
-            if codes:
-                side_menus.append(idx)
+        side_menus = [idx for idx, dish in enumerate(menus) if DISH_TO_BEIL_CODES.get(dish)]
 
         # 4a) 0 Beilagen-Menüs: Flow-UI aufräumen → finale Übersicht → Personen
         if not side_menus:
@@ -1985,18 +1922,15 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["quickone_remaining"] = remaining
 
     # 4) Beilagen-Codes filtern und nur wenn vorhanden Pools nutzen
-    raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-    all_codes = parse_codes(raw)
-    codes = [c for c in all_codes if c != 0]
+    # 4) Beilagen-Codes (O(1) aus Lookup) + Pools
+    codes = DISH_TO_BEIL_CODES.get(dish, [])
     if not codes:
-        # keine Beilagen möglich
         side_nums = []
     else:
-        # Pools initialisieren
         side_pools = context.user_data.setdefault("quickone_side_pools", {})
         if dish not in side_pools:
-            carbs_list = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            veggies_list = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
+            carbs_list   = BEIL_CAT_TO_NUMS["Kohlenhydrate"]
+            veggies_list = BEIL_CAT_TO_NUMS["Gemüse"]
             if 99 in codes:
                 pool = {"carbs": carbs_list.copy(), "veggies": veggies_list.copy()}
             elif 88 in codes:
@@ -2027,7 +1961,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             side_nums = [num]
 
     # 5) Namen ermitteln
-    sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
+    sides = [BEIL_NUM_TO_NAME.get(n, str(n)) for n in side_nums]
 
     # 6) Session speichern
     sessions[uid] = {
@@ -2084,10 +2018,9 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         side_pools = context.user_data.setdefault("quickone_side_pools", {})
         pool = side_pools.get(dish)
         if not pool:
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = parse_codes(raw)
-            carbs_list = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            veggies_list = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
+            codes = DISH_TO_BEIL_CODES.get(dish, [])
+            carbs_list   = BEIL_CAT_TO_NUMS["Kohlenhydrate"]
+            veggies_list = BEIL_CAT_TO_NUMS["Gemüse"]
             if 99 in codes:
                 pool = {"carbs": carbs_list.copy(), "veggies": veggies_list.copy()}
             elif 88 in codes:
@@ -2100,10 +2033,10 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if "carbs" in pool and "veggies" in pool:
             if not pool["carbs"]:
-                pool["carbs"] = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
+                pool["carbs"] = BEIL_CAT_TO_NUMS["Kohlenhydrate"]
             if not pool["veggies"]:
-                pool["veggies"] = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            c = random.choice(pool["carbs"]); pool["carbs"].remove(c)
+                pool["veggies"] = BEIL_CAT_TO_NUMS["Gemüse"]
+            c = random.choice(pool["carbs"]);   pool["carbs"].remove(c)
             v = random.choice(pool["veggies"]); pool["veggies"].remove(v)
             side_nums = [c, v]
         else:
@@ -2111,12 +2044,13 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not single_pool:
                 pool["single"] = pool.get("single", []).copy()
                 single_pool = pool["single"]
-            num = random.choice(single_pool); pool["single"].remove(num)
+            num = random.choice(single_pool); single_pool.remove(num)
             side_nums = [num]
+
 
         sessions[uid]["beilagen"][dish] = side_nums
         persist_session(update)
-        sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
+        sides = [BEIL_NUM_TO_NAME.get(n, str(n)) for n in side_nums]
 
         text1 = f"🥣 <b>Dein Gericht:</b>\n{escape(format_dish_with_sides(dish, sides))}"
         msg1 = await context.bot.send_message(chat_id, text=pad_message(text1))
@@ -2162,12 +2096,8 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mark_yes_no(query, True, "ask_yes", "ask_no")
 
         menus = sessions[uid]["menues"]
-        side_menus = [
-            idx for idx, dish in enumerate(menus)
-            if any(c != 0 for c in parse_codes(
-                df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            ))
-        ]
+        side_menus = [idx for idx, dish in enumerate(menus) if DISH_TO_BEIL_CODES.get(dish)]
+
 
         if len(side_menus) == 1:
             context.user_data["menu_list"] = menus
@@ -2207,25 +2137,23 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
     menus = context.user_data["menu_list"]
     gericht = menus[idx]
 
-    # 2) Beilage-Codes aus df_gerichte lesen und parsen
-    raw = df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0]
-    codes = parse_codes(raw)
+    # 2) Beilage-Codes aus Lookup
+    codes = DISH_TO_BEIL_CODES.get(gericht, [])
 
-    # 3) Erlaubte Nummern ermitteln
+    # 3) Erlaubte Nummern ermitteln (Lookup-gestützt)
     erlaubt = set()
     if 99 in codes:
-        # sowohl Kategorien Kohlenhydrate & Gemüse, keine spezifischen
-        erlaubt = set(
-            df_beilagen[df_beilagen["Kategorie"].isin(["Kohlenhydrate", "Gemüse"])]["Nummer"]
-        )
+        erlaubt |= set(BEIL_CAT_TO_NUMS["Kohlenhydrate"])
+        erlaubt |= set(BEIL_CAT_TO_NUMS["Gemüse"])
     else:
         if 88 in codes:
-            erlaubt |= set(df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"])
+            erlaubt |= set(BEIL_CAT_TO_NUMS["Kohlenhydrate"])
             codes = [c for c in codes if c != 88]
         if 77 in codes:
-            erlaubt |= set(df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"])
+            erlaubt |= set(BEIL_CAT_TO_NUMS["Gemüse"])
             codes = [c for c in codes if c != 77]
         erlaubt |= set(codes)
+
 
     # Erlaube den späteren Zugriff in beilage_select_cb
     context.user_data["allowed_beilage_codes"] = erlaubt
@@ -2233,11 +2161,10 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
 
     # 4) Inline-Buttons bauen (max. 3 pro Zeile) + 'Fertig' in eigener Zeile
     side_buttons = []
-    for num, name, cat in zip(df_beilagen["Nummer"], df_beilagen["Beilagen"], df_beilagen["Kategorie"]):
-        if num in erlaubt:
-            side_buttons.append(
-                InlineKeyboardButton(name, callback_data=f"beilage_{num}")
-            )
+    for num in erlaubt:
+        name = BEIL_NUM_TO_NAME.get(num, str(num))
+        side_buttons.append(InlineKeyboardButton(name, callback_data=f"beilage_{num}"))
+
 
     rows = distribute_buttons_equally(side_buttons, max_per_row=3)
     rows.append([InlineKeyboardButton("Fertig", callback_data="beilage_done")])
@@ -2274,8 +2201,8 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not sel:
             await query.message.reply_text("⚠️ Keine Menüs ausgewählt. Abbruch.")
             return ConversationHandler.END
-        context.user_data["to_process"] = sorted(i-1 for i in sel)  # in 0-basiert
-        #context.user_data["to_process"] = sorted(sel)                                     #herausgenommen am 10/09 aufgrund *Nebenfix". falls nciht geht, wieder reinnehmen
+        #context.user_data["to_process"] = sorted(i-1 for i in sel)  # in 0-basiert             #herausgenommen am 10/09 aufgrund *Nebenfix". falls nciht geht, wieder reinnehmen
+        context.user_data["to_process"] = sorted(sel)
         context.user_data["menu_idx"] = 0
         return await ask_beilagen_for_menu(query, context)
 
@@ -2288,9 +2215,9 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons = []
     for i, gericht in enumerate(menus, start=1):
         # Codes parsen und nur weiter, wenn mindestens ein Code ≠ 0 existiert
-        codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-        if not codes or codes == [0]:
+        if not DISH_TO_BEIL_CODES.get(gericht):
             continue
+
         mark = " ✅" if (i-1) in sel else ""
         buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
     buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
@@ -2357,7 +2284,7 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Buttons neu zeichnen
     side_buttons = []
     for code in context.user_data.get("allowed_beilage_codes", []):
-        name = df_beilagen.loc[df_beilagen["Nummer"] == code, "Beilagen"].iloc[0]
+        name = BEIL_NUM_TO_NAME.get(code, str(code))
         mark = " ✅" if code in sel else ""
         side_buttons.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"beilage_{code}"))
 
@@ -2549,8 +2476,8 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # aktueller Slot und Level
             current_dish  = menues[idx]
             current_aufw  = aufw[idx]
-            row_cur       = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
-            current_art   = ART_ORDER.get(row_cur["Typ"], 2)
+            current_art = ART_ORDER.get(DISH_TO_TYP_STR.get(current_dish, "2"), 2)
+
 
             # a) Andere Slots ausschließen
             other_sel = set(menues) - {current_dish}
@@ -2588,9 +2515,9 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # e) Scoring nach Aufwand & Art
             scored = []
             for cand in pool:
-                row_c    = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
-                cand_aw  = int(row_c["Aufwand"])
-                cand_art = ART_ORDER.get(row_c["Typ"], 2)
+                cand_aw  = int(DISH_TO_AUFWAND.get(cand, 2))
+                cand_art = ART_ORDER.get(DISH_TO_TYP_STR.get(cand, "2"), 2)
+
                 d_aw     = abs(current_aufw - cand_aw)
                 d_art    = abs(current_art   - cand_art)
                 scored.append((cand, (d_aw, d_art)))
@@ -2601,11 +2528,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # f) Neues Gericht wählen und History updaten
             # Aktiv-/Gewicht-Bias in Tie-Break
             def _aktiv_weight(name: str) -> float:
-                row = df_gerichte[df_gerichte["Gericht"] == name].iloc[0]
-                if "Gewicht" in row.index:
-                    return float(row["Gewicht"]) or 1.0
-                a = int(pd.to_numeric(row.get("Aktiv", 2), errors="coerce"))
-                return {0: 0.0, 1: 0.5, 2: 1.0, 3: 2.0}.get(a, 1.0)
+                return float(DISH_TO_GEWICHT.get(name, 1.0)) or 1.0
 
             weights = [_aktiv_weight(c) for c in best]
             neu = random.choices(best, weights=weights, k=1)[0]
@@ -2790,8 +2713,8 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             slot          = idx - 1
             current_dish  = menues[slot]
             current_aufw  = aufw[slot]
-            row_cur       = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
-            current_art   = ART_ORDER.get(row_cur["Typ"], 2)
+            current_art = ART_ORDER.get(DISH_TO_TYP_STR.get(current_dish, "2"), 2)
+
 
             # a) Andere Slots ausschließen
             other_sel = set(menues) - {current_dish}
@@ -2828,9 +2751,9 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # e) Scoring nach Aufwand & Art
             scored = []
             for cand in pool:
-                row_c    = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
-                cand_aw  = int(row_c["Aufwand"])
-                cand_art = ART_ORDER.get(row_c["Typ"], 2)
+                cand_aw  = int(DISH_TO_AUFWAND.get(cand, 2))
+                cand_art = ART_ORDER.get(DISH_TO_TYP_STR.get(cand, "2"), 2)
+
                 d_aw     = abs(current_aufw - cand_aw)
                 d_art    = abs(current_art   - cand_art)
                 scored.append((cand, (d_aw, d_art)))
@@ -2841,11 +2764,8 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # f) Tausche & History updaten
             # Aktiv-/Gewicht-Bias in Tie-Break
             def _aktiv_weight(name: str) -> float:
-                row = df_gerichte[df_gerichte["Gericht"] == name].iloc[0]
-                if "Gewicht" in row.index:
-                    return float(row["Gewicht"]) or 1.0
-                a = int(pd.to_numeric(row.get("Aktiv", 2), errors="coerce"))
-                return {0: 0.0, 1: 0.5, 2: 1.0, 3: 2.0}.get(a, 1.0)
+                return float(DISH_TO_GEWICHT.get(name, 1.0)) or 1.0
+
 
             weights = [_aktiv_weight(c) for c in best]
             neu = random.choices(best, weights=weights, k=1)[0]
@@ -2951,12 +2871,8 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # jetzt gleiche Beilagen-Logik wie oben in menu_confirm_cb:
         menus = sessions[uid]["menues"]
-        side_menus = []
-        for idx, dish in enumerate(menus):
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = [c for c in parse_codes(raw) if c != 0]
-            if codes:
-                side_menus.append(idx)
+        side_menus = [idx for idx, dish in enumerate(menus) if DISH_TO_BEIL_CODES.get(dish)]
+
 
         # 0 Beilagen-Menüs
         if not side_menus:
@@ -3040,7 +2956,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Beilagen
     all_nums = sum(sessions[user_id].get("beilagen", {}).values(), [])
-    beilage_names = df_beilagen.loc[df_beilagen["Nummer"].isin(all_nums), "Beilagen"].tolist()
+    beilage_names = [BEIL_NUM_TO_NAME.get(n, str(n)) for n in all_nums]
     zut_beilage = df[
         (df["Typ"] == "Beilagen") &
         (df["Gericht"].isin(beilage_names))
@@ -3105,12 +3021,12 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ze_html = escape(", ".join(ze_parts))
 
         # Titel (mit optionalem Link) + Aufwandlabel
-        try:
-            link_value = str(
-                df_gerichte.loc[df_gerichte["Gericht"] == g, "Link"].iloc[0]
-            ).strip()
-        except Exception:
-            link_value = ""
+        link_value  = (DISH_TO_LINK.get(g, "") or "").strip()
+        aufwand_raw = DISH_TO_AUFWAND.get(g, "")
+        mapping     = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)", 1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+        aufwand_txt = mapping.get(aufwand_raw, "")
+        aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>" if aufwand_txt else ""
+
 
         name_html = f"<b>{escape(g)}</b>"
         if link_value:
@@ -3121,14 +3037,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
 
         aufwand_label_html = ""
-        try:
-            aufwand_raw = df_gerichte.loc[df_gerichte["Gericht"] == g, "Aufwand"].iloc[0]
-            mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
-            aufwand_txt = mapping.get(str(aufwand_raw).strip(), "")
-            if aufwand_txt:
-                aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
-        except Exception:
-            pass
+
 
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
@@ -4194,24 +4103,6 @@ Anleitung (kurz Schritt-für-Schritt):"""
         await update.message.reply_text(f"❌ Fehler: {e}")
         return REZEPT_PERSONEN
 
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def do_POST(self):
-        # Verhindert 501 vom Health-Server, solange der PTB-Webhook nicht läuft
-        if self.path.startswith("/webhook/"):
-            self.send_response(204)   # No Content
-        else:
-            self.send_response(404)
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
-
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -4228,7 +4119,6 @@ def main():
     app.add_handler(CommandHandler("setup", setup))
     app.add_handler(CommandHandler("tausche", tausche, filters=filters.Regex(r"^\s*/tausche\s+\d"), block=True))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("favorit", favorit))
     #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
     app.add_handler(CommandHandler("delete", delete))
@@ -4247,7 +4137,7 @@ def main():
             PROFILE_NEW_A: [CallbackQueryHandler(profile_new_a_cb, pattern="^res_")],
             PROFILE_NEW_B: [CallbackQueryHandler(profile_new_b_cb, pattern="^style_")],
             PROFILE_NEW_C: [CallbackQueryHandler(profile_new_c_cb, pattern="^weight_")],
-            PROFILE_OVERVIEW: [CallbackQueryHandler(profile_overview_cb, pattern="^prof_(over|next)")],
+            PROFILE_OVERVIEW: [CallbackQueryHandler(profile_overview_cb, pattern="^prof_(overwrite|next)$")],
             MENU_INPUT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_input)],
             ASK_CONFIRM:   [CallbackQueryHandler(menu_confirm_cb, pattern="^confirm_")],
             ASK_BEILAGEN:  [CallbackQueryHandler(ask_beilagen_cb)],
