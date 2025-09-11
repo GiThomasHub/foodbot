@@ -1,20 +1,44 @@
-import os, re, json, random, math, asyncio, base64, gzip, time, logging
-import warnings
-from html import escape, unescape
-from datetime import datetime
-from collections import Counter
-
+import os
+import re
+import json
+import random
 import pandas as pd
 import gspread
+import warnings
+import requests                                                 #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
+import urllib.request
+import logging
+import base64, gzip, time
 import httpx
+import math
+import asyncio
+from aiohttp import web
+from html import escape, unescape
+from datetime import datetime
+from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler    #HTTPServer könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
+from collections import Counter
+from fpdf import FPDF                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
+from fpdf.enums import XPos, YPos
 from dotenv import load_dotenv
 from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
+from typing import Set                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from decimal import Decimal, ROUND_HALF_UP
-
 from google.cloud import firestore
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import telegram
+from telegram.constants import ChatAction, ParseMode        #ChatAction und ParseMode könnten gelöscht werden -> ausprobieren wenn mal zeit besteht
+from telegram.helpers import escape_markdown                #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
+from persistence import (
+    user_key,
+    get_profile as store_get_profile, set_profile as store_set_profile,
+    get_favorites as store_get_favorites, set_favorites as store_set_favorites,
+    # Neu für Sessions (pro Chat):
+    chat_key,
+    get_session as store_get_session, set_session as store_set_session, delete_session as store_delete_session,
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -25,14 +49,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     Defaults,
 )
-from telegram.constants import ParseMode
 from telegram.warnings import PTBUserWarning
-
-from fpdf import FPDF
-from fpdf.enums import XPos, YPos
-
-import urllib.request
-
 
 warnings.filterwarnings("ignore", category=PTBUserWarning)
 
@@ -60,6 +77,47 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # HELPER:
 
 # === Cloud Run: Health + Telegram Webhook via aiohttp ===
+def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
+    from aiohttp import web
+    from telegram import Update
+
+    async def _health(_req):
+        return web.Response(text="OK", status=200)
+
+    async def _tg_webhook(req):
+        try:
+            data = await req.json()
+        except Exception:
+            return web.Response(text="bad json", status=400)
+        upd = Update.de_json(data, app.bot)
+        await app.process_update(upd)
+        return web.Response(text="OK", status=200)
+
+    aio = web.Application()
+    aio.router.add_get("/webhook/health", _health)
+    aio.router.add_post(f"/{url_path}", _tg_webhook)
+
+    async def _on_startup(_):
+        await app.initialize()
+        try:
+            await app.bot.set_webhook(url=webhook_url, secret_token=secret_token)
+            print("✅ set_webhook OK")
+        except Exception as e:
+            print(f"⚠️ set_webhook failed: {e} — continuing")
+        await app.start()
+
+    async def _on_cleanup(_):
+        await app.stop()
+        await app.shutdown()
+        try:
+            await HTTPX_CLIENT.aclose()
+        except Exception:
+            pass
+
+    aio.on_startup.append(_on_startup)
+    aio.on_cleanup.append(_on_cleanup)
+    web.run_app(aio, host="0.0.0.0", port=port)
+
 
 def _compute_base_url():
     # 1) Falls gesetzt, einfach nehmen
@@ -186,6 +244,16 @@ def show_debug_for(update: Update) -> bool:
     ADMIN_IDS = {7650843881}  # in telegram @userinfobot ersichtlich
     return update.effective_user.id in ADMIN_IDS
 
+
+def load_json(path):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
@@ -4125,6 +4193,25 @@ Anleitung (kurz Schritt-für-Schritt):"""
     except Exception as e:
         await update.message.reply_text(f"❌ Fehler: {e}")
         return REZEPT_PERSONEN
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def do_POST(self):
+        # Verhindert 501 vom Health-Server, solange der PTB-Webhook nicht läuft
+        if self.path.startswith("/webhook/"):
+            self.send_response(204)   # No Content
+        else:
+            self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
