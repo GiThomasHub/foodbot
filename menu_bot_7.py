@@ -119,12 +119,7 @@ SHEETS_CACHE_TTL_SEC = int(os.getenv("SHEETS_CACHE_TTL_SEC", "3600"))
 SHEETS_CACHE_NAMESPACE = os.getenv("SHEETS_CACHE_NAMESPACE", "v1")
 
 # Firestore-Client nur nutzen, wenn PERSISTENCE=firestore (Prod)
-try:
-    FS = firestore.Client() if PERSISTENCE == "firestore" else None
-except Exception as e:
-    logging.warning("Firestore-Init fehlgeschlagen (%s) – Sheets-Cache wird deaktiviert.", e)
-    FS = None
-
+FS = firestore.Client() if PERSISTENCE == "firestore" else None
 
 
 
@@ -256,45 +251,30 @@ def _fs_doc_for(name: str):
 def _cache_read_if_fresh(name: str, ttl_sec: int):
     if not FS:
         return None
-    try:
-        doc = _fs_doc_for(name).get()
-    except Exception as e:
-        logging.warning("Sheets-Cache: Firestore-Read fehlgeschlagen (%s) → Fallback auf Sheets", e)
-        return None
-
+    doc = _fs_doc_for(name).get()
     if not doc.exists:
         return None
-
     d = doc.to_dict() or {}
     updated_ts = int(d.get("updated_ts", 0))
     if time.time() - updated_ts > ttl_sec:
         return None  # abgelaufen
-
     try:
         payload = gzip.decompress(base64.b64decode(d["payload_b64_gzip"]))
         return json.loads(payload.decode("utf-8"))
-    except Exception as e:
-        logging.warning("Sheets-Cache: Dekomprimieren/JSON fehlgeschlagen (%s) → Fallback auf Sheets", e)
+    except Exception:
         return None
 
 def _cache_write(name: str, compact_obj: dict):
     if not FS:
         return
-    try:
-        payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
-        b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
-        _fs_doc_for(name).set(
-            {
-                "payload_b64_gzip": b64,
-                "updated_ts": int(time.time()),
-                "ttl_sec": SHEETS_CACHE_TTL_SEC,
-                "schema_version": 1,
-            },
-            merge=True,
-        )
-    except Exception as e:
-        logging.warning("Sheets-Cache: Firestore-Write fehlgeschlagen (%s) – ignoriere und fahre fort", e)
-
+    payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
+    b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
+    _fs_doc_for(name).set({
+        "payload_b64_gzip": b64,
+        "updated_ts": int(time.time()),
+        "ttl_sec": SHEETS_CACHE_TTL_SEC,
+        "schema_version": 1,
+    }, merge=True)
 
 def load_favorites() -> dict:
     """Favoriten aus Datei laden (oder leeres Dict, wenn Datei fehlt)"""
@@ -642,14 +622,6 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 # ============================================================================================
 
 
-def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=8, done_cb="fav_add_done")
-
-def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_add_", total=total, selected=selected, max_per_row=7, done_cb="fav_add_done")
-
 #gerichte zuteilen, falls aus favoriten gerichte selektiert
 def get_random_gerichte(profile, filters, aufwandsliste, block=None, limit=3, mode="session"):
     """
@@ -714,6 +686,13 @@ def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per
     rows.append([InlineKeyboardButton("Fertig", callback_data=done_cb)])
     return InlineKeyboardMarkup(rows)
 
+def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
+    """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Fertig'."""
+    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=8, done_cb="fav_add_done")
+
+def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
+    """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
+    return _build_numbers_keyboard(prefix="fav_add_", total=total, selected=selected, max_per_row=7, done_cb="fav_add_done")
 # ============================================================================================
 
 async def send_main_buttons(msg):
@@ -830,14 +809,14 @@ def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
         cb = _cache_read_if_fresh("beilagen", ttl_sec)
         cz = _cache_read_if_fresh("zutaten",  ttl_sec)
         if cg and cb and cz:
-            logging.info("Sheets-Cache: HIT (Firestore, frisch)")
+            print("Sheets-Cache: HIT (Firestore, frisch)")
             return (
                 _compact_json_to_df(cg),
                 _compact_json_to_df(cb),
                 _compact_json_to_df(cz),
             )
         else:
-            logging.info("Sheets-Cache: MISS/EXPIRED → lade aus Google Sheets")
+            print("Sheets-Cache: MISS/EXPIRED → lade aus Google Sheets")
 
     # 2) Aus Google Sheets laden (deine bestehenden Loader)
     df_g = lade_gerichtebasis()
@@ -850,9 +829,9 @@ def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
             _cache_write("gerichte", _df_to_compact_json(df_g))
             _cache_write("beilagen", _df_to_compact_json(df_b))
             _cache_write("zutaten",  _df_to_compact_json(df_z))
-            logging.info("Sheets-Cache: Snapshot in Firestore aktualisiert")
+            print("Sheets-Cache: Snapshot in Firestore aktualisiert")
         except Exception as e:
-            logging.warning("Sheets-Cache: Write-Fehler: %s", e)
+            print(f"⚠️ Cache-Write Fehler: {e}")
 
     return df_g, df_b, df_z
 
@@ -865,40 +844,6 @@ df_gerichte["Typ"] = (
       .map({1: "1", 2: "2", 3: "3"})
       .fillna("2")
 )
-
-# --- Schnell-Indizes für häufige Lookups ---
-_G_INDEX = df_gerichte.set_index("Gericht")[["Beilagen", "Aufwand", "Typ", "Link", "Gewicht"]].to_dict(orient="index")
-
-def gi(name: str):
-    """Schneller Zugriff auf Gerichte-Zeile als dict (oder None)."""
-    try:
-        return _G_INDEX.get(name)
-    except Exception:
-        return None
-
-def get_beilagen_codes_for(dish: str) -> list[int]:
-    """Beilagen-Codes eines Gerichts als Liste[int], robust und schnell."""
-    row = gi(dish)
-    if not row:
-        return []
-    s = str(row.get("Beilagen") or "").strip()
-    return parse_codes(s) if s else []
-
-def get_aufwand_for(dish: str):
-    """Aufwand eines Gerichts als int (1/2/3) oder None."""
-    row = gi(dish)
-    if not row:
-        return None
-    try:
-        return int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
-    except Exception:
-        return None
-
-def get_link_for(dish: str) -> str:
-    """Optionale Link-URL eines Gerichts, getrimmt (oder '')."""
-    row = gi(dish)
-    return str(row.get("Link") or "").strip() if row else ""
-
 
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
@@ -1861,7 +1806,8 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         menus = sessions[uid]["menues"]
         side_menus = []
         for idx, dish in enumerate(menus):
-            codes = [c for c in get_beilagen_codes_for(dish) if c != 0]
+            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
+            codes = [c for c in parse_codes(raw) if c != 0]
             if codes:
                 side_menus.append(idx)
 
@@ -2977,7 +2923,8 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         menus = sessions[uid]["menues"]
         side_menus = []
         for idx, dish in enumerate(menus):
-            codes = [c for c in get_beilagen_codes_for(dish) if c != 0]
+            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
+            codes = [c for c in parse_codes(raw) if c != 0]
             if codes:
                 side_menus.append(idx)
 
@@ -3128,7 +3075,12 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ze_html = escape(", ".join(ze_parts))
 
         # Titel (mit optionalem Link) + Aufwandlabel
-        link_value = get_link_for(g)
+        try:
+            link_value = str(
+                df_gerichte.loc[df_gerichte["Gericht"] == g, "Link"].iloc[0]
+            ).strip()
+        except Exception:
+            link_value = ""
 
         name_html = f"<b>{escape(g)}</b>"
         if link_value:
@@ -3139,12 +3091,14 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
 
         aufwand_label_html = ""
-        aufwand_raw = get_aufwand_for(g)
-        mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
-        aufwand_txt = mapping.get(str(aufwand_raw).strip(), "") if aufwand_raw is not None else ""
-        if aufwand_txt:
-            aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
-
+        try:
+            aufwand_raw = df_gerichte.loc[df_gerichte["Gericht"] == g, "Aufwand"].iloc[0]
+            mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
+            aufwand_txt = mapping.get(str(aufwand_raw).strip(), "")
+            if aufwand_txt:
+                aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
+        except Exception:
+            pass
 
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
@@ -3892,6 +3846,8 @@ async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 def build_fav_selection_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 7 pro Zeile) für Selektions-Modus + 'Fertig'."""
     return _build_numbers_keyboard(prefix="fav_sel_", total=total, selected=selected, max_per_row=7, done_cb="fav_sel_done")
+
+
 
 async def fav_selection_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
