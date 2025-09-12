@@ -5,7 +5,6 @@ import random
 import pandas as pd
 import gspread
 import warnings
-import requests                                                 #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 import urllib.request
 import logging
 import base64, gzip, time
@@ -16,21 +15,18 @@ from aiohttp import web
 from html import escape, unescape
 from datetime import datetime
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler    #HTTPServer könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from collections import Counter
 from fpdf import FPDF                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from fpdf.enums import XPos, YPos
 from dotenv import load_dotenv
-from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
-from typing import Set                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from decimal import Decimal, ROUND_HALF_UP
 from google.cloud import firestore
+from telegram.constants import ParseMode
+from google.oauth2.service_account import Credentials
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram
-from telegram.constants import ChatAction, ParseMode        #ChatAction und ParseMode könnten gelöscht werden -> ausprobieren wenn mal zeit besteht
-from telegram.helpers import escape_markdown                #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from persistence import (
     user_key,
     get_profile as store_get_profile, set_profile as store_set_profile,
@@ -77,47 +73,6 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # HELPER:
 
 # === Cloud Run: Health + Telegram Webhook via aiohttp ===
-def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
-    from aiohttp import web
-    from telegram import Update
-
-    async def _health(_req):
-        return web.Response(text="OK", status=200)
-
-    async def _tg_webhook(req):
-        try:
-            data = await req.json()
-        except Exception:
-            return web.Response(text="bad json", status=400)
-        upd = Update.de_json(data, app.bot)
-        await app.process_update(upd)
-        return web.Response(text="OK", status=200)
-
-    aio = web.Application()
-    aio.router.add_get("/webhook/health", _health)
-    aio.router.add_post(f"/{url_path}", _tg_webhook)
-
-    async def _on_startup(_):
-        await app.initialize()
-        try:
-            await app.bot.set_webhook(url=webhook_url, secret_token=secret_token)
-            print("✅ set_webhook OK")
-        except Exception as e:
-            print(f"⚠️ set_webhook failed: {e} — continuing")
-        await app.start()
-
-    async def _on_cleanup(_):
-        await app.stop()
-        await app.shutdown()
-        try:
-            await HTTPX_CLIENT.aclose()
-        except Exception:
-            pass
-
-    aio.on_startup.append(_on_startup)
-    aio.on_cleanup.append(_on_cleanup)
-    web.run_app(aio, host="0.0.0.0", port=port)
-
 
 def _compute_base_url():
     # 1) Falls gesetzt, einfach nehmen
@@ -168,8 +123,28 @@ FS = firestore.Client() if PERSISTENCE == "firestore" else None
 
 
 
-# Instantiate OpenAI client (new SDK)
-openai_client = OpenAI(api_key=OPENAI_KEY, timeout=20, max_retries=1)
+def _get_openai_client():
+    """
+    OpenAI nur verwenden, wenn OPENAI_API_KEY gesetzt ist. 
+    Fehlerresistent initialisieren (kein Crash bei fehlendem Key/Paket).
+    """
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        return None
+    try:
+        from openai import OpenAI
+        return OpenAI(api_key=key, timeout=20, max_retries=1)
+    except Exception as e:
+        logging.warning("OpenAI init übersprungen: %s", e)
+        return None
+
+def _fallback_steps(dish: str, zut_text: str) -> str:
+    return (
+        "1) Zutaten bereitstellen und vorbereiten.\n"
+        f"2) {dish} nach üblicher Methode zubereiten.\n"
+        "3) Abschmecken und anrichten.\n"
+        "4) Guten Appetit!"
+    )
 
 scope = [
     "https://spreadsheets.google.com/feeds",
@@ -177,10 +152,11 @@ scope = [
 ]
 gc = os.getenv("GOOGLE_CRED_JSON")
 if gc and gc.strip().startswith("{"):
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(gc), scope)
+    creds = Credentials.from_service_account_info(json.loads(gc), scopes=scope)
 else:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(gc or "credentials.json", scope)
+    creds = Credentials.from_service_account_file(gc or "credentials.json", scopes=scope)
 client = gspread.authorize(creds)
+
 
 # === Persistence Files ===
 DATA_DIR = os.getenv("DATA_DIR","/tmp")
@@ -241,19 +217,18 @@ WEIGHT_CHOICES["weight_any"] = None          #  «Egal» = keine Einschränkung
 
 # Nur für Admins: Aufwand-Verteilung anzeigen
 def show_debug_for(update: Update) -> bool:
-    ADMIN_IDS = {7650843881}  # in telegram @userinfobot ersichtlich
-    return update.effective_user.id in ADMIN_IDS
-
-
-def load_json(path):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """
+    Admin-Erkennung: per ENV ADMIN_IDS="123,456" (Secrets) oder Fallback auf die bisherige ID.
+    """
+    default_ids = {7650843881}
+    raw = (os.getenv("ADMIN_IDS") or "").strip()
+    try:
+        env_ids = {int(x) for x in raw.split(",") if x.strip()}
+    except ValueError:
+        env_ids = set()
+    admin_ids = env_ids or default_ids
+    u = getattr(update, "effective_user", None)
+    return bool(u and u.id in admin_ids)
 
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
@@ -3739,7 +3714,9 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
             reply_markup=build_fav_numbers_keyboard(len(favs), set())
         )
         context.user_data["fav_msgs"].extend([list_msg.message_id, sel_msg.message_id])
-        return FAV_ADD_SELECT
+        #return FAV_ADD_SELECT
+        return FAV_DELETE_SELECT
+
 
     if q.data == "fav_action_select":
         favs = favorites.get(uid, [])
@@ -3817,7 +3794,9 @@ async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT
     sel.symmetric_difference_update({idx})
     total = context.user_data["fav_total"]
     await q.edit_message_reply_markup(build_fav_numbers_keyboard(total, sel))
-    return FAV_ADD_SELECT
+    #return FAV_ADD_SELECT
+    return FAV_DELETE_SELECT
+
 
 async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -4172,11 +4151,20 @@ Zutaten:
 {zut_text}
 
 Anleitung (kurz Schritt-für-Schritt):"""
-            resp = openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            steps = resp.choices[0].message.content.strip()
+            _client = _get_openai_client()
+            if _client:
+                try:
+                    resp = _client.chat.completions.create(
+                        model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    steps = resp.choices[0].message.content.strip()
+                except Exception as e:
+                    logging.warning("OpenAI-Fehler, nutze Fallback: %s", e)
+                    steps = _fallback_steps(dish, zut_text)
+            else:
+                steps = _fallback_steps(dish, zut_text)
+
             recipe_cache[cache_key] = steps
             save_json(CACHE_FILE, recipe_cache)
 
@@ -4193,24 +4181,6 @@ Anleitung (kurz Schritt-für-Schritt):"""
     except Exception as e:
         await update.message.reply_text(f"❌ Fehler: {e}")
         return REZEPT_PERSONEN
-
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def do_POST(self):
-        # Verhindert 501 vom Health-Server, solange der PTB-Webhook nicht läuft
-        if self.path.startswith("/webhook/"):
-            self.send_response(204)   # No Content
-        else:
-            self.send_response(404)
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
