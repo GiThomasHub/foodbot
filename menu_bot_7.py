@@ -845,40 +845,6 @@ df_gerichte["Typ"] = (
       .fillna("2")
 )
 
-# --- Schnell-Indizes für häufige Lookups ---
-_G_INDEX = df_gerichte.set_index("Gericht")[["Beilagen", "Aufwand", "Typ", "Link", "Gewicht"]].to_dict(orient="index")
-
-def gi(name: str):
-    """Schneller Zugriff auf Gerichte-Zeile als dict (oder None)."""
-    try:
-        return _G_INDEX.get(name)
-    except Exception:
-        return None
-
-def get_beilagen_codes_for(dish: str) -> list[int]:
-    """Beilagen-Codes eines Gerichts als Liste[int], robust und schnell."""
-    row = gi(dish)
-    if not row:
-        return []
-    s = str(row.get("Beilagen") or "").strip()
-    return parse_codes(s) if s else []
-
-def get_aufwand_for(dish: str):
-    """Aufwand eines Gerichts als int (1/2/3) oder None."""
-    row = gi(dish)
-    if not row:
-        return None
-    try:
-        return int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
-    except Exception:
-        return None
-
-def get_link_for(dish: str) -> str:
-    """Optionale Link-URL eines Gerichts, getrimmt (oder '')."""
-    row = gi(dish)
-    return str(row.get("Link") or "").strip() if row else ""
-
-
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
 # -------------------------------------------------
