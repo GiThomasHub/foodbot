@@ -491,6 +491,14 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
+def build_new_run_banner() -> str:
+    """Erzeugt die Statuszeile 'Neuer Lauf: Wochentag, TT.MM.YY, HH:MM Uhr' (deutsche Wochentage)."""
+    now = datetime.now()
+    wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    wday = wdays[now.weekday()]
+    return f"Neuer Lauf: {wday}, {now.strftime('%d.%m.%y')}, {now.strftime('%H:%M')} Uhr"
+
+
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
 
 # ===== Zentraler Flow-Reset & Mini-Helper =====
@@ -707,7 +715,7 @@ def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per
 
 def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=8, done_cb="fav_add_done")
+    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=8, done_cb="fav_del_done")
 
 def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
@@ -3193,29 +3201,26 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ###################---------------------- Export to Bring--------------------
 
 async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Erstellt HTML-Rezept-Gist → Deeplink → Sendet Bring-Button"""
+    """Erstellt HTML-Rezept-Gist → Deeplink → sendet Bring!-Button in **neuer** Chat-Nachricht (ohne die Liste zu überschreiben)."""
     query = update.callback_query
     await query.answer()
 
     eink = context.user_data.get("einkaufsliste_df")
     if eink is None:
-        await query.edit_message_text("❌ Keine Einkaufsliste gefunden.")
+        # NICHT editieren, neue Nachricht senden
+        await query.message.reply_text("❌ Keine Einkaufsliste gefunden.")
         return ConversationHandler.END
 
-    # --- 1) JSON-LD aufbereiten (nach Kategorie sortiert) -------------------
-    # Stabil sortieren: erst nach Kategorie, dann nach Zutat.
-    # Leere Kategorien als "Sonstiges" behandeln, damit die Sortierung deterministisch ist.
+    # --- 1) JSON-LD aufbereiten (stabil sortiert) ---
     eink_sorted = (
         eink.copy()
         .assign(Kategorie=lambda d: d["Kategorie"].fillna("Sonstiges"))
         .sort_values(["Kategorie", "Zutat"], kind="mergesort")
     )
-
     recipe_ingredients = [
         (f"{format_amount(r.Menge)} {r.Einheit} {r.Zutat}").strip()
         for _, r in eink_sorted.iterrows()
     ]
-
     recipe_jsonld = {
         "@context": "https://schema.org",
         "@type":    "Recipe",
@@ -3223,7 +3228,6 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "author":   {"@type": "Organization", "name": "FoodApp"},
         "recipeIngredient": recipe_ingredients,
     }
-
     html_content = (
         "<!doctype html><html><head>"
         "<meta charset='utf-8'>"
@@ -3231,19 +3235,18 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{json.dumps(recipe_jsonld, ensure_ascii=False)}</script>"
         "</head><body></body></html>"
     )
-
     logging.info("Bring-Import JSON: %s", json.dumps(recipe_jsonld, ensure_ascii=False))
 
-    # --- 2) Öffentlichen Gist anlegen --------------------------------------
+    # --- 2) Öffentlichen Gist anlegen ---
     if not GITHUB_TOKEN:
-        await query.edit_message_text(
+        # NICHT editieren, neue Nachricht senden
+        await query.message.reply_text(
             "❌ Kein GitHub-Token gefunden (Umgebungsvariable GITHUB_TOKEN). "
             "Ohne öffentliches Rezept kann Bring! nichts importieren."
         )
         return ConversationHandler.END
 
-    headers = {"Authorization": f"token {GITHUB_TOKEN}",
-               "Accept": "application/vnd.github+json"}
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     gist_payload = {
         "description": "FoodApp – temporärer Bring-Recipe-Import",
         "public": True,
@@ -3259,18 +3262,17 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gist_resp.raise_for_status()
         raw_url = gist_resp.json()["files"]["recipe.html"]["raw_url"]
 
-        # --- 3) Deeplink von Bring holen --------------------------------
+        # --- 3) Deeplink von Bring holen ---
         dl_resp = await HTTPX_CLIENT.get(
             "https://api.getbring.com/rest/bringrecipes/deeplink",
             params={"url": raw_url, "source": "web"},
             follow_redirects=False,
         )
 
-
         if dl_resp.status_code in (301, 302, 303, 307, 308):
             deeplink = dl_resp.headers.get("location")
         else:
-            dl_resp.raise_for_status()          # echte Fehler
+            dl_resp.raise_for_status()
             deeplink = dl_resp.json().get("deeplink")
 
         if not deeplink:
@@ -3280,21 +3282,18 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except (httpx.HTTPError, RuntimeError) as err:
         logging.error("Fehler bei Bring-Export: %s", err)
-        await query.edit_message_text(
-            "❌ Bring-Export fehlgeschlagen. Versuche es später erneut."
-        )
+        # NICHT editieren, neue Nachricht senden
+        await query.message.reply_text("❌ Bring-Export fehlgeschlagen. Versuche es später erneut.")
         return ConversationHandler.END
 
-    # --- 4) Button senden & Conversation beenden ---------------------------
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("In Bring! importieren", url=deeplink)]]
-    )
-    await query.edit_message_text(
-        "🛒 Einkaufsliste an Bring! senden:",
-        reply_markup=kb
-    )
+    # --- 4) Button in **neuer** Nachricht senden & im State bleiben ---
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("In Bring! importieren", url=deeplink)]])
+    await query.message.reply_text("🛒 Einkaufsliste an Bring! senden:", reply_markup=kb)
+
+    # Optional: Aktionsmenü zusätzlich (separate Nachricht) – überschreibt nichts
     await send_action_menu(query.message)
     return EXPORT_OPTIONS
+
 
 
 ###################---------------------- PDF Export--------------------
@@ -3582,16 +3581,24 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
     if data == "restart_yes":
-        # Kurzer Abschiedsgruß → löschen → danach zur Übersicht
+        # Kurzer Abschiedsgruß → nach 2s löschen → Banner → 1s → Übersicht
         try:
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+        except Exception:
+            pass
+
+        try:
+            banner = build_new_run_banner()
+            await context.bot.send_message(chat_id, pad_message(banner))
+            await asyncio.sleep(1.0)
         except Exception:
             pass
 
         await send_overview(chat_id, context)
         return ConversationHandler.END
+
 
     # data == "restart_no": zurück ins Aktionsmenü dieses Flows
     await send_action_menu(q.message)
@@ -3613,16 +3620,24 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
     if data == "restart_yes_ov":
-        # kurzer Abschiedsgruß → wieder löschen → NEUE Übersicht unten posten
+        # Abschiedsgruß → 2s → löschen → Banner → 1s → Übersicht
         try:
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+        except Exception:
+            pass
+
+        try:
+            banner = build_new_run_banner()
+            await context.bot.send_message(chat_id, pad_message(banner))
+            await asyncio.sleep(1.0)
         except Exception:
             pass
 
         await send_overview(chat_id, context)  # neue Übersicht als letzte Nachricht
         return ConversationHandler.END
+
 
     # data == 'restart_no_ov' → nur die Frage war da → gelöscht, sonst nichts tun
     return ConversationHandler.END
@@ -3850,43 +3865,53 @@ async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT
 
 
 async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
+    q   = update.callback_query
     await q.answer()
     uid = str(q.from_user.id)
-    sel = sorted(context.user_data.get("fav_del_sel", set()))
+
+    # Auswahl lesen (robust in absteigender Reihenfolge löschen)
+    sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
+
+    ensure_favorites_loaded(uid)
     favs = favorites.get(uid, [])
 
-    removed = []
-    for idx in sel[::-1]:  # rückwärts löschen, um Indexverschiebung zu vermeiden
+    removed = 0
+    for idx in sel:
         if 1 <= idx <= len(favs):
-            removed.append(favs.pop(idx - 1))
+            favs.pop(idx - 1)
+            removed += 1
 
-    if removed:
+    if removed > 0:
         favorites[uid] = favs
         store_set_favorites(user_key(int(uid)), favorites[uid])
-        msg_del = await q.message.reply_text(f"🗑️ {len(removed)} Favoriten entfernt.")
-        await asyncio.sleep(1)
-        try:
-            await msg_del.delete()
-        except:
-            pass
-    else:
-        msg_warn = await q.message.reply_text("⚠️ Keine Favoriten entfernt.")
-        await asyncio.sleep(1)
-        try:
-            await msg_warn.delete()
-        except:
-            pass
 
-    # Aufräumen: Auswahlnachrichten löschen
-    for mid in context.user_data.get("fav_msgs", []):
+    # Feedback 2 Sek. anzeigen
+    try:
+        msg = await q.message.reply_text(
+            f"🗑️ {removed} Favoriten entfernt." if removed else "⚠️ Keine Favoriten entfernt."
+        )
+        await asyncio.sleep(2.0)
         try:
-            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
-        except:
+            await msg.delete()
+        except Exception:
             pass
+    except Exception:
+        pass
 
+    # Alle Favoriten-Flow-Nachrichten wegräumen (egal aus welchem der zwei Flows)
+    for list_key in ("fav_msgs", "fav_add_msgs"):
+        for mid in context.user_data.get(list_key, []):
+            try:
+                await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data[list_key] = []
+
+    # Auswahl zurücksetzen
+    context.user_data.pop("fav_del_sel", None)
+
+    # WICHTIG: Keine neue Übersicht, kein Aktionsmenü – Flow sauber beenden
     return ConversationHandler.END
-
 
 
 async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3916,55 +3941,6 @@ async def fav_selection_toggle_cb(update: Update, context: ContextTypes.DEFAULT_
     return FAV_ADD_SELECT
 
 
-
-
-
-async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q   = update.callback_query
-    await q.answer()
-    uid = str(q.from_user.id)
-    sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
-    ensure_favorites_loaded(uid)
-    favs = favorites.get(uid, [])
-
-    # Favoriten löschen
-    for idx in sel:
-        if 1 <= idx <= len(favs):
-            favs.pop(idx - 1)
-    favorites[uid] = favs
-    store_set_favorites(user_key(int(uid)), favorites[uid])
-
-    # alle bisherigen Loop-Nachrichten löschen
-    msg = q.message
-    for mid in context.user_data.get("fav_msgs", []):
-        try:
-            await context.bot.delete_message(chat_id=msg.chat.id, message_id=mid)
-        except:
-            pass
-
-    # falls leer → Hauptmenü & Ende
-    if not favs:
-        warn = await q.message.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
-        await asyncio.sleep(2)
-        try:
-            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=warn.message_id)
-        except:
-            pass
-        return ConversationHandler.END
-
-
-    # sonst neue Übersicht + Ja/Nein, IDs neu setzen
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {escape(d)}" for d in favs)
-    m1  = await q.message.reply_text(pad_message(txt))
-    m2  = await q.message.reply_text(
-        "Bearbeiten?",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="fav_edit_yes"),
-            InlineKeyboardButton("Nein", callback_data="fav_edit_no")
-        ]])
-    )
-    context.user_data["fav_msgs"] = [m1.message_id, m2.message_id]
-    return FAV_OVERVIEW
 
 # ===================================== FAVORITEN–FLOW (hinzufügen)=============================
 
@@ -4357,7 +4333,7 @@ def main():
             ],
             FAV_DELETE_SELECT: [
                 CallbackQueryHandler(fav_number_toggle_cb, pattern=r"^fav_del_\d+$"),
-                CallbackQueryHandler(fav_delete_done_cb,   pattern="^fav_del_done$"),
+                CallbackQueryHandler(fav_del_done_cb,      pattern="^fav_del_done$"),
                 CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_yes$"),
                 CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_no$")
             ],
