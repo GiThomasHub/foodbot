@@ -878,6 +878,7 @@ def get_link_for(dish: str) -> str:
     row = gi(dish)
     return str(row.get("Link") or "").strip() if row else ""
 
+
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
 # -------------------------------------------------
@@ -1839,7 +1840,8 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         menus = sessions[uid]["menues"]
         side_menus = []
         for idx, dish in enumerate(menus):
-            codes = [c for c in get_beilagen_codes_for(dish) if c != 0]
+            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
+            codes = [c for c in parse_codes(raw) if c != 0]
             if codes:
                 side_menus.append(idx)
 
