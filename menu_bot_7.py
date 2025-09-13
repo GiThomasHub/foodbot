@@ -119,8 +119,11 @@ SHEETS_CACHE_TTL_SEC = int(os.getenv("SHEETS_CACHE_TTL_SEC", "3600"))
 SHEETS_CACHE_NAMESPACE = os.getenv("SHEETS_CACHE_NAMESPACE", "v1")
 
 # Firestore-Client nur nutzen, wenn PERSISTENCE=firestore (Prod)
-FS = firestore.Client() if PERSISTENCE == "firestore" else None
-
+try:
+    FS = firestore.Client() if PERSISTENCE == "firestore" else None
+except Exception as e:
+    logging.warning("Firestore-Init fehlgeschlagen (%s) – Sheets-Cache wird deaktiviert.", e)
+    FS = None
 
 
 def _get_openai_client():
@@ -251,30 +254,46 @@ def _fs_doc_for(name: str):
 def _cache_read_if_fresh(name: str, ttl_sec: int):
     if not FS:
         return None
-    doc = _fs_doc_for(name).get()
+    try:
+        doc = _fs_doc_for(name).get()
+    except Exception as e:
+        logging.warning("Sheets-Cache: Firestore-Read fehlgeschlagen (%s) → Fallback auf Sheets", e)
+        return None
+
     if not doc.exists:
         return None
+
     d = doc.to_dict() or {}
     updated_ts = int(d.get("updated_ts", 0))
     if time.time() - updated_ts > ttl_sec:
         return None  # abgelaufen
+
     try:
         payload = gzip.decompress(base64.b64decode(d["payload_b64_gzip"]))
         return json.loads(payload.decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        logging.warning("Sheets-Cache: Dekomprimieren/JSON fehlgeschlagen (%s) → Fallback auf Sheets", e)
         return None
+
 
 def _cache_write(name: str, compact_obj: dict):
     if not FS:
         return
-    payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
-    b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
-    _fs_doc_for(name).set({
-        "payload_b64_gzip": b64,
-        "updated_ts": int(time.time()),
-        "ttl_sec": SHEETS_CACHE_TTL_SEC,
-        "schema_version": 1,
-    }, merge=True)
+    try:
+        payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
+        b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
+        _fs_doc_for(name).set(
+            {
+                "payload_b64_gzip": b64,
+                "updated_ts": int(time.time()),
+                "ttl_sec": SHEETS_CACHE_TTL_SEC,
+                "schema_version": 1,
+            },
+            merge=True,
+        )
+    except Exception as e:
+        logging.warning("Sheets-Cache: Firestore-Write fehlgeschlagen (%s) – ignoriere und fahre fort", e)
+
 
 def load_favorites() -> dict:
     """Favoriten aus Datei laden (oder leeres Dict, wenn Datei fehlt)"""
@@ -836,6 +855,8 @@ def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
     return df_g, df_b, df_z
 
 df_gerichte, df_beilagen, df_zutaten = _load_sheets_via_cache()
+
+
 
 # --- Normalisierung: Typ immer als "1"/"2"/"3" ---
 df_gerichte["Typ"] = (
