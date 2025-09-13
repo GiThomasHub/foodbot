@@ -2955,7 +2955,8 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         menus = sessions[uid]["menues"]
         side_menus = []
         for idx, dish in enumerate(menus):
-            codes = [c for c in get_beilagen_codes_for(dish) if c != 0]
+            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
+            codes = [c for c in parse_codes(raw) if c != 0]
             if codes:
                 side_menus.append(idx)
 
@@ -3106,7 +3107,12 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ze_html = escape(", ".join(ze_parts))
 
         # Titel (mit optionalem Link) + Aufwandlabel
-        link_value = get_link_for(g)
+        try:
+            link_value = str(
+                df_gerichte.loc[df_gerichte["Gericht"] == g, "Link"].iloc[0]
+            ).strip()
+        except Exception:
+            link_value = ""
 
         name_html = f"<b>{escape(g)}</b>"
         if link_value:
@@ -3117,12 +3123,14 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
 
         aufwand_label_html = ""
-        aufwand_raw = get_aufwand_for(g)
-        mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
-        aufwand_txt = mapping.get(str(aufwand_raw).strip(), "") if aufwand_raw is not None else ""
-        if aufwand_txt:
-            aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
-
+        try:
+            aufwand_raw = df_gerichte.loc[df_gerichte["Gericht"] == g, "Aufwand"].iloc[0]
+            mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
+            aufwand_txt = mapping.get(str(aufwand_raw).strip(), "")
+            if aufwand_txt:
+                aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
+        except Exception:
+            pass
 
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
@@ -3871,6 +3879,8 @@ def build_fav_selection_keyboard(total: int, selected: set[int]) -> InlineKeyboa
     """Zahlen-Buttons (max. 7 pro Zeile) für Selektions-Modus + 'Fertig'."""
     return _build_numbers_keyboard(prefix="fav_sel_", total=total, selected=selected, max_per_row=7, done_cb="fav_sel_done")
 
+
+
 async def fav_selection_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -3880,6 +3890,10 @@ async def fav_selection_toggle_cb(update: Update, context: ContextTypes.DEFAULT_
     total = context.user_data.get("fav_total", 0)
     await q.edit_message_reply_markup(reply_markup=build_fav_selection_keyboard(total, sel))
     return FAV_ADD_SELECT
+
+
+
+
 
 async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q   = update.callback_query
