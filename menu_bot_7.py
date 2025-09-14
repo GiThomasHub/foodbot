@@ -491,6 +491,12 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
+# NEW: track IDs von Nachrichten, die wir beim Neustart gezielt löschen wollen
+def _track_export_msg(context: "ContextTypes.DEFAULT_TYPE", msg_id: int) -> None:
+    if not isinstance(msg_id, int):
+        return
+    context.user_data.setdefault("export_msgs", []).append(msg_id)
+
 
 def build_new_run_banner() -> str:
     """Erzeugt die Statuszeile 'Neuer Lauf: Wochentag, TT.MM.YY, HH:MM Uhr' (deutsche Wochentage)."""
@@ -537,7 +543,7 @@ async def reset_flow_state(
     chat_id = update.effective_chat.id if update.effective_chat else None
 
     # 1) Nachrichtenlisten: bekannte Keys
-    msg_keys_all = ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]
+    msg_keys_all = ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs", "export_msgs"]
     if only_keys is not None:
         msg_keys = [k for k in msg_keys_all if k in only_keys]
         clear_ephemeral = False  # bei only_keys keine States löschen
@@ -3241,6 +3247,7 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ Kein GitHub-Token gefunden (Umgebungsvariable GITHUB_TOKEN). "
             "Ohne öffentliches Rezept kann Bring! nichts importieren."
         )
+        # die editierte Nachricht ist bereits „Fehler“-Text; wir müssen sie nicht speziell tracken
         return ConversationHandler.END
 
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
@@ -3276,13 +3283,15 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Bring-Export fehlgeschlagen. Versuche es später erneut.")
         return ConversationHandler.END
 
-    # Aktionsmenü-Nachricht in Bring-Button umwandeln
+    # Aktionsmenü-Nachricht in Bring-Button umwandeln (und ID merken fürs spätere Löschen beim Neustart)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("In Bring! importieren", url=deeplink)]])
     await query.edit_message_text("🛒 Einkaufsliste an Bring! senden:", reply_markup=kb)
+    _track_export_msg(context, query.message.message_id)
 
     # Neues Aktionsmenü darunter erneut anbieten
     await send_action_menu(query.message)
     return EXPORT_OPTIONS
+
 
 
 ###################---------------------- PDF Export--------------------
@@ -3346,48 +3355,39 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
 
     # PDF initialisieren (mit Kopf-/Fußzeile und 2 cm Rändern)
     date_str = datetime.now().strftime("%d.%m.%Y")
-    pdf = PDF(date_str)  # <<--- WICHTIG: unsere Unterklasse benutzen
-    # Fonts optional – mit Fallback auf Core-Fonts
+    pdf = PDF(date_str)  # unsere Unterklasse
     try:
         pdf.add_font("DejaVu", "",  "fonts/DejaVuSans.ttf")
         pdf.add_font("DejaVu", "B", "fonts/DejaVuSans-Bold.ttf")
         pdf.add_page()
     except Exception:
-        pdf.add_page()  # Core-Fonts (Helvetica) werden bereits verwendet
+        pdf.add_page()
 
-
-    # ---------- Helper: KOCHLISTE (zweizeilig: Titel-Zeile, Zutaten-Zeile) ----------
+    # ---------- Helper: KOCHLISTE ----------
     def write_kochliste():
         pdf.set_font("DejaVu", "B", 14)
         pdf.cell(0, 10, "Kochliste", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # Header-Zeile(n) und Leerzeilen robust entfernen
         raw_lines = koch_text.splitlines()
         lines = []
         for l in raw_lines:
             if not l.strip():
                 continue
             plain = unescape(re.sub(r"<[^>]+>", "", l))
-            if "Kochliste" in plain:  # filtert z.B. "<b><u>🍽 Kochliste …</u></b>"
+            if "Kochliste" in plain:
                 continue
             lines.append(l)
 
-        # Paarbildung: (Titel, Zutaten)
         last_title = None
         for l in lines:
             if last_title is None:
                 last_title = l
                 continue
 
-            title_html = last_title
-            ingredients_html = l
+            title_plain       = unescape(re.sub(r"<[^>]+>", "", last_title))
+            ingredients_plain = unescape(re.sub(r"<[^>]+>", "", l))
             last_title = None
 
-            # HTML → Plaintext
-            title_plain       = unescape(re.sub(r"<[^>]+>", "", title_html))
-            ingredients_plain = unescape(re.sub(r"<[^>]+>", "", ingredients_html))
-
-            # Ausgabe
             pdf.set_x(pdf.l_margin)
             pdf.set_font("DejaVu", "B", 12)
             pdf.multi_cell(pdf.epw, 8, title_plain, align="L")
@@ -3397,7 +3397,6 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
             pdf.multi_cell(pdf.epw, 8, ingredients_plain, align="L")
             pdf.ln(2)
 
-        # Falls am Ende eine Titelzeile ohne Zutaten übrig bleibt
         if last_title is not None:
             title_plain = unescape(re.sub(r"<[^>]+>", "", last_title))
             pdf.set_x(pdf.l_margin)
@@ -3405,21 +3404,17 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
             pdf.multi_cell(pdf.epw, 8, title_plain, align="L")
             pdf.ln(2)
 
-    # ---------- Helper: EINKAUFSLISTE (2 Spalten, Kategorien als Überschriften) ----------
+    # ---------- Helper: EINKAUFSLISTE ----------
     def write_einkaufsliste():
-        # Überschrift
         pdf.set_font("DejaVu", "B", 14)
         pdf.cell(0, 10, "Einkaufsliste", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # Spalten-Setup
         col_gap = 8
         col_w   = (pdf.epw - col_gap) / 2
         left_x  = pdf.l_margin
         right_x = pdf.l_margin + col_w + col_gap
-        start_y = pdf.get_y()  # Start nach der Überschrift
-        col     = 0            # 0 = links, 1 = rechts
-        pdf.set_xy(left_x, start_y)  # <<— harte Positionierung auf Spaltenanfang
-
+        start_y = pdf.get_y()
+        col     = 0
 
         def current_x():
             return left_x if col == 0 else right_x
@@ -3430,15 +3425,12 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
         def switch_column():
             nonlocal col, start_y, left_x, right_x, col_w
             if col == 0:
-                # auf rechte Spalte derselben Seite
                 col = 1
                 pdf.set_xy(right_x, start_y)
             else:
-                # neue Seite + Überschrift + wieder linke Spalte
                 pdf.add_page()
                 pdf.set_font("DejaVu", "B", 14)
                 pdf.cell(0, 10, "Einkaufsliste", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-                # Neu berechnen (Seitenbreite kann sich u.U. geändert haben)
                 col_w   = (pdf.epw - col_gap) / 2
                 left_x  = pdf.l_margin
                 right_x = pdf.l_margin + col_w + col_gap
@@ -3447,33 +3439,25 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
                 pdf.set_xy(left_x, start_y)
 
         def ensure_space(height_needed: float):
-            # wenn das Element nicht mehr in die aktuelle Spalte passt → Spaltenwechsel/Seitenwechsel
             if pdf.get_y() + height_needed <= page_bottom():
                 return
             switch_column()
 
         def calc_item_height(txt: str, line_h: float = 6.0) -> float:
-            # grobe Zeilenanzahl anhand Textbreite
             width = pdf.get_string_width(txt)
             lines = max(1, math.ceil(width / col_w)) if col_w > 0 else 1
             return lines * line_h
 
-        # nach Kategorie gruppiert (wie im Chat), Items darunter
-        # Hinweis: CAT_EMOJI & format_amount sind global definert. :contentReference[oaicite:2]{index=2}
         pdf.set_font("DejaVu", "", 12)
         for cat, group in eink_df.sort_values(["Kategorie", "Zutat"]).groupby("Kategorie"):
-            # Kategorie-Überschrift (exakt linksbündig in der Spalte)
             head = str(cat)
             ensure_space(8)
             pdf.set_font("DejaVu", "B", 12)
-            pdf.set_x(current_x())  # nur X setzen, Y unverändert lassen
+            pdf.set_x(current_x())
             pdf.multi_cell(col_w, 8, head, align="L")
-            pdf.set_x(current_x())  # nach MultiCell X wieder exakt auf Spaltenanfang
+            pdf.set_x(current_x())
             pdf.set_font("DejaVu", "", 12)
 
-
-
-            # Items der Kategorie
             for _, row in group.iterrows():
                 raw = str(row["Menge_raw"]).strip()
                 if not raw.replace(".", "").isdigit():
@@ -3488,31 +3472,40 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
                 pdf.set_xy(current_x(), pdf.get_y())
                 pdf.multi_cell(col_w, 6, line, align="L")
 
-            # kleiner Abstand nach jeder Kategorie
             ensure_space(2)
             pdf.set_xy(current_x(), pdf.get_y() + 2)
 
-    # ---------- Reihenfolge je nach Wahl ----------
+    # --- Ausgabereihenfolge je nach Wahl ---
     if choice == "koch":
         write_kochliste()
     elif choice == "einkauf":
         write_einkaufsliste()
-    else:  # "beides" → Kochliste zuerst, dann Seitenumbruch, dann Einkaufsliste
+    else:
         write_kochliste()
         pdf.add_page()
         write_einkaufsliste()
 
     # --- Speichern & Senden ---
-    filename = f"liste_{q.from_user.id}.pdf"
-    pdf.output(filename)
-    await q.edit_message_text("📄 Hier ist dein PDF:")
-    with open(filename, "rb") as f:
-        await q.message.reply_document(document=f, filename="Liste.pdf")
-    os.remove(filename)
+    tmp_filename = f"liste_{q.from_user.id}.pdf"   # interner Temp-Dateiname
+    pdf.output(tmp_filename)
 
-    # sende allgemeines Aktions-Menu und kehre in den EXPORT_OPTIONS-State zurück
+    # Aktionsmenü-Nachricht in "Hier ist dein PDF:" umwandeln und ID merken
+    await q.edit_message_text("📄 Hier ist dein PDF:")
+    _track_export_msg(context, q.message.message_id)
+
+    # Download-Name wie gewünscht: "Foodylenko - TT.MM.YY.pdf"
+    date_disp = datetime.now().strftime("%d.%m.%y")
+    with open(tmp_filename, "rb") as f:
+        pdf_msg = await q.message.reply_document(document=f, filename=f"Foodylenko - {date_disp}.pdf")
+    os.remove(tmp_filename)
+
+    # Auch die PDF-Dokument-Nachricht fürs spätere Löschen merken
+    _track_export_msg(context, pdf_msg.message_id)
+
+    # Danach neues Aktionsmenü
     await send_action_menu(q.message)
     return EXPORT_OPTIONS
+
 
 
 ###################---------------------- NEUSTART FLOW--------------------
@@ -3562,7 +3555,7 @@ async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Bestätigung für 'Das passt so. Neustart!' am Prozessende.
-    Erwartete callback_data: 'restart_yes' oder 'restart_no' (ohne _ov).
+    Erwartete callback_data: 'restart_yes' oder 'restart_no'.
     """
     q = update.callback_query
     await q.answer()
@@ -3576,28 +3569,41 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
     if data == "restart_yes":
-        # Kurzer Abschiedsgruß → nach 2s löschen → Banner → 1s → Übersicht
+        # NEU: zuerst alle gemerkten Export-/Status-Nachrichten löschen
+        for mid in context.user_data.get("export_msgs", []):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data["export_msgs"] = []
+
+        # kurzer Abschiedsgruß → 2s stehen lassen → löschen
         try:
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.2)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
         except Exception:
             pass
 
+        # „Neuer Lauf: Wochentag, TT.MM.YY, TT:TT Uhr“
         try:
-            banner = build_new_run_banner()
-            await context.bot.send_message(chat_id, pad_message(banner))
-            await asyncio.sleep(1.0)
+            now = datetime.now()
+            wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+            wtag = wdays[now.weekday()]
+            stamp = now.strftime("%d. %B.%Y")
+            info = await context.bot.send_message(chat_id, pad_message(f"<b>Neustart: {wtag}, {stamp}</b>"))
+            await asyncio.sleep(0.5)
         except Exception:
             pass
 
+        # Übersicht posten
         await send_overview(chat_id, context)
         return ConversationHandler.END
-
 
     # data == "restart_no": zurück ins Aktionsmenü dieses Flows
     await send_action_menu(q.message)
     return EXPORT_OPTIONS
+
 
 async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Bestätigung für '🔄 Restart' aus der Übersicht.
@@ -4027,7 +4033,8 @@ async def fav_add_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Favoriten-Übersicht senden
     txt = "⭐ Deine aktualisierte Favoritenliste:\n" + "\n".join(f"- {d}" for d in favs)
-    await msg.reply_text(txt)
+    favlist_msg = await msg.reply_text(txt)
+    _track_export_msg(context, favlist_msg.message_id)
 
     # Zurück ins Aktions-Menu
     await send_action_menu(msg)
