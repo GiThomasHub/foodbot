@@ -491,6 +491,27 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
+async def strip_final_list_buttons(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """
+    Entfernt die Inline-Buttons unter der finalen Koch/Einkaufsliste,
+    lässt aber die Nachricht selbst stehen.
+    Erwartet, dass 'final_list_msg_id' in context.user_data gesetzt ist.
+    """
+    msg_id = context.user_data.get("final_list_msg_id")
+    if not msg_id:
+        return
+    try:
+        # reply_markup=None entfernt die Inline-Buttons
+        await context.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=msg_id,
+            reply_markup=None
+        )
+    except Exception:
+        # Wenn Nachricht schon editiert/gelöscht wurde – ignorieren
+        pass
+
+
 def build_new_run_banner() -> str:
     """Erzeugt die Statuszeile 'Neuer Lauf: Wochentag, TT.MM.YY, HH:MM Uhr' (deutsche Wochentage)."""
     now = datetime.now()
@@ -3183,13 +3204,16 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [ InlineKeyboardButton("🔄 Das passt so. Neustart!", callback_data="restart") ],
     ])
 
-    await context.bot.send_message(
+    sent = await context.bot.send_message(
         chat_id=chat_id,
         text=koch_text + eink_text,
         parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=keyboard
     )
+# Message-ID der finalen Liste merken, um später die Buttons wegzunehmen
+context.user_data["final_list_msg_id"] = sent.message_id
+
 
     return ConversationHandler.END
 
