@@ -491,33 +491,6 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
-async def strip_final_list_buttons(context: "ContextTypes.DEFAULT_TYPE", chat_id: int) -> None:
-    """
-    Entfernt die Inline-Buttons unter der finalen Koch/Einkaufsliste,
-    lässt aber die Nachricht selbst stehen.
-    Erwartet, dass 'final_list_msg_id' in context.user_data gesetzt ist.
-    """
-    msg_id = context.user_data.get("final_list_msg_id")
-    if not isinstance(msg_id, int):
-        return
-    try:
-        # reply_markup=None entfernt die Inline-Buttons
-        await context.bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=msg_id,
-            reply_markup=None
-        )
-    except BadRequest as e:
-        # z.B. "Message is not modified" oder wenn die Nachricht schon weg ist
-        if "message is not modified" in str(e).lower():
-            return
-        # andere BadRequest-Fälle stillschweigend ignorieren
-        return
-    except Exception:
-        # Falls Nachricht bereits gelöscht/editiert wurde o.ä.
-        return
-
-
 
 def build_new_run_banner() -> str:
     """Erzeugt die Statuszeile 'Neuer Lauf: Wochentag, TT.MM.YY, HH:MM Uhr' (deutsche Wochentage)."""
@@ -3204,25 +3177,21 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # — Einkaufs- & Kochliste senden + Export-Buttons an dieselbe Nachricht —
 
-    keyboard = InlineKeyboardMarkup([
-        [ InlineKeyboardButton("🔖 Gerichte zu Favoriten hinzufügen", callback_data="favoriten") ],
-        [ InlineKeyboardButton("🛒 Einkaufsliste in Bring! exportieren", callback_data="export_bring") ],
-        [ InlineKeyboardButton("📄 Als PDF exportieren", callback_data="export_pdf") ],
-        [ InlineKeyboardButton("🔄 Das passt so. Neustart!", callback_data="restart") ],
-    ])
-
-    sent = await context.bot.send_message(
+    # 1) Finale Liste OHNE Buttons senden (bleibt im Chat stehen)
+    sent_list = await context.bot.send_message(
         chat_id=chat_id,
         text=koch_text + eink_text,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=keyboard
     )
-    # Message-ID der finalen Liste merken, um später die Buttons wegzunehmen
-    context.user_data["final_list_msg_id"] = sent.message_id
+    # optional: für spätere Referenzen
+    context.user_data["final_list_msg_id"] = sent_list.message_id
 
+    # 2) Aktionsmenü als EIGENE Nachricht direkt darunter senden
+    await send_action_menu(sent_list)
 
     return ConversationHandler.END
+
 
 
 ##############################################
@@ -3232,29 +3201,16 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ###################---------------------- Export to Bring--------------------
 
 async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Erstellt HTML-Rezept-Gist → Deeplink → Sendet Bring-Button.
-       Einheitlich: Aktionsmenü löschen, Buttons unter der Liste entfernen.
-    """
+    """Erstellt HTML-Recipe-Gist → Bring-Deeplink. Ersetzt das Aktionsmenü (nicht die Liste)."""
     query = update.callback_query
     await query.answer()
-    chat_id = query.message.chat.id
 
-    # 1) Buttons unter finaler Liste entfernen
-    await strip_final_list_buttons(context, chat_id=chat_id)
-
-    # 2) Aktionsmenü ("Was möchtest Du weiter tun?") entfernen
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
-    except Exception:
-        pass
-
-    # 3) Daten prüfen
     eink = context.user_data.get("einkaufsliste_df")
     if eink is None:
-        await context.bot.send_message(chat_id, "❌ Keine Einkaufsliste gefunden.")
+        await query.edit_message_text("❌ Keine Einkaufsliste gefunden.")
         return ConversationHandler.END
 
-    # --- 4) JSON-LD vorbereiten (stabil sortiert) ---
+    # --- JSON-LD vorbereiten (stabil sortiert) ---
     eink_sorted = (
         eink.copy()
         .assign(Kategorie=lambda d: d["Kategorie"].fillna("Sonstiges"))
@@ -3280,10 +3236,8 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     logging.info("Bring-Import JSON: %s", json.dumps(recipe_jsonld, ensure_ascii=False))
 
-    # --- 5) Gist erstellen ---
     if not GITHUB_TOKEN:
-        await context.bot.send_message(
-            chat_id,
+        await query.edit_message_text(
             "❌ Kein GitHub-Token gefunden (Umgebungsvariable GITHUB_TOKEN). "
             "Ohne öffentliches Rezept kann Bring! nichts importieren."
         )
@@ -3301,7 +3255,6 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gist_resp.raise_for_status()
         raw_url = gist_resp.json()["files"]["recipe.html"]["raw_url"]
 
-        # --- 6) Deeplink von Bring holen ---
         dl_resp = await HTTPX_CLIENT.get(
             "https://api.getbring.com/rest/bringrecipes/deeplink",
             params={"url": raw_url, "source": "web"},
@@ -3320,53 +3273,38 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except (httpx.HTTPError, RuntimeError) as err:
         logging.error("Fehler bei Bring-Export: %s", err)
-        await context.bot.send_message(chat_id, "❌ Bring-Export fehlgeschlagen. Versuche es später erneut.")
+        await query.edit_message_text("❌ Bring-Export fehlgeschlagen. Versuche es später erneut.")
         return ConversationHandler.END
 
-    # --- 7) Bring-Button als NEUE Nachricht senden (Aktionsmenü wurde gelöscht) ---
+    # Aktionsmenü-Nachricht in Bring-Button umwandeln
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("In Bring! importieren", url=deeplink)]])
-    msg_btn = await context.bot.send_message(chat_id, "🛒 Einkaufsliste an Bring! senden:", reply_markup=kb)
+    await query.edit_message_text("🛒 Einkaufsliste an Bring! senden:", reply_markup=kb)
 
-    # --- 8) Danach wieder allgemeines Aktionsmenü anbieten ---
-    await send_action_menu(msg_btn)
+    # Neues Aktionsmenü darunter erneut anbieten
+    await send_action_menu(query.message)
     return EXPORT_OPTIONS
-
-
 
 
 ###################---------------------- PDF Export--------------------
 
 async def export_to_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fragt, welche Listen exportiert werden sollen.
-       Einheitlich: Aktionsmenü löschen, Buttons unter der Liste entfernen.
+    """Fragt, welche Listen exportiert werden sollen. Ersetzt das Aktionsmenü (nicht die Liste).”
     """
     query = update.callback_query
     await query.answer()
-    chat_id = query.message.chat.id
 
-    # 1) Buttons unter finaler Liste entfernen
-    await strip_final_list_buttons(context, chat_id=chat_id)
-
-    # 2) Aktionsmenü entfernen
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
-    except Exception:
-        pass
-
-    # 3) Daten prüfen
     eink_df   = context.user_data.get("einkaufsliste_df")
     koch_text = context.user_data.get("kochliste_text")
     if eink_df is None or eink_df.empty or not koch_text:
-        await context.bot.send_message(chat_id, "❌ Keine Listen zum Export gefunden.")
+        await query.edit_message_text("❌ Keine Listen zum Export gefunden.")
         return ConversationHandler.END
 
-    # 4) Auswahl als NEUE Nachricht senden
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Einkaufsliste", callback_data="pdf_export_einkauf")],
         [InlineKeyboardButton("Kochliste",     callback_data="pdf_export_koch")],
         [InlineKeyboardButton("Beides",        callback_data="pdf_export_beides")],
     ])
-    await context.bot.send_message(chat_id, "Was brauchst Du im PDF Export?", reply_markup=kb)
+    await query.edit_message_text("Was brauchst Du im PDF Export?", reply_markup=kb)
     return PDF_EXPORT_CHOICE
 
 
@@ -3582,28 +3520,17 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
 
 async def restart_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry-Point für Neustart-Button: fragt nach Bestätigung.
-       Einheitlich: Aktionsmenü löschen, Buttons unter der Liste entfernen.
+       Ersetzt das Aktionsmenü (nicht die Liste).
     """
     q = update.callback_query
     await q.answer()
-    chat_id = q.message.chat.id
 
-    # 1) Buttons unter finaler Liste entfernen
-    await strip_final_list_buttons(context, chat_id=chat_id)
-
-    # 2) Aktionsmenü entfernen
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-    except Exception:
-        pass
-
-    # 3) Bestätigungsfrage als NEUE Nachricht senden
     text = "🔄 Bist Du sicher? Die Gerichtsauswahl wird zurückgesetzt (Favoriten bleiben bestehen)"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Ja",   callback_data="restart_yes"),
          InlineKeyboardButton("Nein", callback_data="restart_no")]
     ])
-    await context.bot.send_message(chat_id, text, reply_markup=kb)
+    await q.edit_message_text(text, reply_markup=kb)
     return RESTART_CONFIRM
 
 
@@ -4017,32 +3944,22 @@ async def fav_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     msg = q.message
 
-    # Einheitlich: Buttons unter finaler Liste entfernen
-    await strip_final_list_buttons(context, chat_id=msg.chat.id)
-
-    # Aktionsmenü entfernen
-    try:
-        await context.bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id)
-    except Exception:
-        pass
-
-
     # Liste der Gerichte aus user_data holen
     dishes = context.user_data.get("final_list", [])
     if not dishes:
-        return await msg.reply_text("ℹ️ Keine Gerichte verfügbar.")
+        await msg.edit_text("ℹ️ Keine Gerichte verfügbar.")
+        return ConversationHandler.END
 
     # Auswahl initialisieren
     context.user_data["fav_add_sel"]  = set()
     context.user_data["fav_add_msgs"] = []
 
-    # 0) Überschrift mit Erklärung senden + ID speichern
-    header_msg = await msg.reply_text(
-        "🥣 Deine aktuellen Gerichte (* bereits bei den Favoriten)"
-    )
-    context.user_data["fav_add_msgs"].append(header_msg.message_id)
+    # 1) Aktionsmenü in Header der Favoriten-Auswahl verwandeln (ersetzt)
+    header_text = "🥣 Deine aktuellen Gerichte (* bereits bei den Favoriten)"
+    await msg.edit_text(header_text)
+    context.user_data["fav_add_msgs"].append(msg.message_id)
 
-    # 1) Nummerierte Liste senden + ID speichern (Stern bei bestehenden Favoriten)
+    # 2) Nummerierte Liste posten
     user_id       = str(q.from_user.id)
     existing_favs = set(favorites.get(user_id, []))
     list_msg = await msg.reply_text(
@@ -4053,7 +3970,7 @@ async def fav_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["fav_add_msgs"].append(list_msg.message_id)
 
-    # 2) Auswahl-Keyboard senden + ID speichern
+    # 3) Auswahl-Keyboard posten
     sel_msg = await msg.reply_text(
         "Welche Gerichte möchtest Du zu deinen Favoriten hinzufügen?",
         reply_markup=build_fav_add_numbers_keyboard(len(dishes), set())
@@ -4061,6 +3978,7 @@ async def fav_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["fav_add_msgs"].append(sel_msg.message_id)
 
     return FAV_ADD_SELECT
+
 
 
 async def fav_add_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
