@@ -497,7 +497,7 @@ def build_new_run_banner() -> str:
     now = datetime.now()
     wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
     wday = wdays[now.weekday()]
-    return f"Neustart: {wday}, {now.strftime('%d.%b.%y')}"
+    return f"<b>Neustart: {wday}, {now.strftime('%d. %b %y')}</b>"
 
 
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
@@ -626,7 +626,7 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="persons_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
-    prompt = "Für wie viel Personen soll die Einkaufs- und Kochliste erstellt werden?"
+    prompt = "Für wie viele Personen soll die Einkaufs- und Kochliste erstellt werden?"
 
     # a) Bei echtem Seitenwechsel nur das Keyboard updaten
     if q and data in ("persons_page_low", "persons_page_high"):
@@ -743,7 +743,7 @@ async def send_action_menu(msg):
         [ InlineKeyboardButton("📄 Als PDF exportieren",   callback_data="export_pdf")   ],
         [ InlineKeyboardButton("🔄 Das passt so. Neustart!",             callback_data="restart")      ],
     ])
-    await msg.reply_text(pad_message("Was möchtest Du weiter tun?"), reply_markup=kb)
+    await msg.reply_text(pad_message("Was willst Du machen?"), reply_markup=kb)
 
 
 
@@ -1436,7 +1436,7 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
-    text = "Wie viele Gerichte möchtest vorgeschlagen bekommen?"
+    text = "Wie viele Gerichte soll ich zusammenstellen?"
 
     # a) Bei echtem Seitenwechsel: nur ReplyMarkup editen
     if q and data in ("menu_count_page_high", "menu_count_page_low"):
@@ -3525,7 +3525,7 @@ async def restart_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    text = "🔄 Bist Du sicher? Die Gerichtsauswahl wird zurückgesetzt (Favoriten bleiben bestehen)"
+    text = "🔄 Bist Du sicher, dass Du neu starten möchtest?"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Ja",   callback_data="restart_yes"),
          InlineKeyboardButton("Nein", callback_data="restart_no")]
@@ -3542,7 +3542,7 @@ async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await q.answer()
     chat_id = q.message.chat.id
 
-    confirm_text = pad_message("<b>Bist Du sicher, dass Du neu starten möchtest?</b>\nDas setzt den Vorgang zurück.")
+    confirm_text = pad_message("🔄 Bist Du sicher, dass Du neu starten möchtest?")
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Ja",   callback_data="restart_yes_ov"),
         InlineKeyboardButton("Nein", callback_data="restart_no_ov"),
