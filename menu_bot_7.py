@@ -491,14 +491,14 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
-async def strip_final_list_buttons(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+async def strip_final_list_buttons(context: "ContextTypes.DEFAULT_TYPE", chat_id: int) -> None:
     """
     Entfernt die Inline-Buttons unter der finalen Koch/Einkaufsliste,
     lässt aber die Nachricht selbst stehen.
     Erwartet, dass 'final_list_msg_id' in context.user_data gesetzt ist.
     """
     msg_id = context.user_data.get("final_list_msg_id")
-    if not msg_id:
+    if not isinstance(msg_id, int):
         return
     try:
         # reply_markup=None entfernt die Inline-Buttons
@@ -507,9 +507,16 @@ async def strip_final_list_buttons(context: ContextTypes.DEFAULT_TYPE, chat_id: 
             message_id=msg_id,
             reply_markup=None
         )
+    except BadRequest as e:
+        # z.B. "Message is not modified" oder wenn die Nachricht schon weg ist
+        if "message is not modified" in str(e).lower():
+            return
+        # andere BadRequest-Fälle stillschweigend ignorieren
+        return
     except Exception:
-        # Wenn Nachricht schon editiert/gelöscht wurde – ignorieren
-        pass
+        # Falls Nachricht bereits gelöscht/editiert wurde o.ä.
+        return
+
 
 
 def build_new_run_banner() -> str:
@@ -3211,8 +3218,8 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True,
         reply_markup=keyboard
     )
-# Message-ID der finalen Liste merken, um später die Buttons wegzunehmen
-context.user_data["final_list_msg_id"] = sent.message_id
+    # Message-ID der finalen Liste merken, um später die Buttons wegzunehmen
+    context.user_data["final_list_msg_id"] = sent.message_id
 
 
     return ConversationHandler.END
