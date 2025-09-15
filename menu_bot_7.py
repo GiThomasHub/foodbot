@@ -1615,6 +1615,8 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Beispiel: 4 (2,1,1)
     """
     try:
+        final_gerichte: list[str] = []
+        final_aufwand:  list[int] = []        
         text = update.message.text.strip()
         user_id = str(update.message.from_user.id)
 
