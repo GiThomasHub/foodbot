@@ -503,8 +503,8 @@ def build_new_run_banner() -> str:
     now = datetime.now()
     wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
     wday = wdays[now.weekday()]
-    return f"<b>Neustart: {wday}, {now.strftime('%d. %b %y')}</b>"
-
+    stamp = now.strftime("%d. %b %Y")
+    return f"<u><b>Neustart: {wday}, {stamp}</b></u>"
 
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
 
@@ -747,15 +747,18 @@ def build_fav_add_keyboard_dishes(
     rows = []
     for i, name in enumerate(dishes, start=1):
         is_fav = name in existing_favs
-        # Platz für ⭐ reservieren, damit sie wirklich am Ende stehen kann
         avail = max_len - (1 if is_fav else 0)
         base = _truncate_label(name, avail)
         label = base + ("⭐" if is_fav else "")
         if i in selected:
             label = "✅ " + label
         rows.append([InlineKeyboardButton(label, callback_data=f"fav_add_{i}")])
-    rows.append([InlineKeyboardButton("Fertig", callback_data="fav_add_done")])
+
+    # Footer-Button: keine Auswahl → "Keines", sonst "✔️ Weiter/Fertig"
+    footer_label = "✖️ Keines" if not selected else "✔️ Fertig"
+    rows.append([InlineKeyboardButton(footer_label, callback_data="fav_add_done")])
     return InlineKeyboardMarkup(rows)
+
 
 # ============================================================================================
 
@@ -3494,10 +3497,10 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
                 raw = str(row["Menge_raw"]).strip()
                 if not raw.replace(".", "").isdigit():
                     txt  = raw or "wenig"
-                    line = f"■ {row['Zutat']}: {txt}"
+                    line = f"▪ {row['Zutat']}: {txt}"
                 else:
                     amt  = format_amount(row["Menge"])
-                    line = f"■ {row['Zutat']}: {amt} {row['Einheit']}"
+                    line = f"▪ {row['Zutat']}: {amt} {row['Einheit']}"
 
                 h = calc_item_height(line, line_h=6)
                 ensure_space(h)
@@ -3635,12 +3638,15 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Banner „Neustart: …“
     try:
-        now = datetime.now()
-        wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-        wtag = wdays[now.weekday()]
-        stamp = now.strftime("%d. %B.%Y")
-        await context.bot.send_message(chat_id, pad_message(f"🔄 <u><b>Neustart: {wtag}, {stamp}</b></u>"))
-        await asyncio.sleep(0.5)
+        #now = datetime.now()
+        #wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+        #wtag = wdays[now.weekday()]
+        #stamp = now.strftime("%d. %b %Y")
+        #await context.bot.send_message(chat_id, pad_message(f"🔄 <u><b>Neustart: {wtag}, {stamp}</b></u>"))
+        #await asyncio.sleep(0.5)
+        banner = build_new_run_banner() #new
+        await context.bot.send_message(chat_id, pad_message(banner)) #new
+        await asyncio.sleep(1.0) #new
     except Exception:
         pass
 
