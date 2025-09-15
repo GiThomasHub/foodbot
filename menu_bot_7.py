@@ -703,11 +703,11 @@ def distribute_buttons_equally(buttons, max_per_row=7):
         index += count
     return rows
 
-def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per_row: int, done_cb: str) -> InlineKeyboardMarkup:
+def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per_row: int, done_cb: str, *, done_label_empty: str = "Fertig", done_label_some:  str = "✔️ Fertig",) -> InlineKeyboardMarkup:
     """
     Generischer Zahlen-Keyboard-Builder.
     prefix:  'fav_del_' | 'fav_add_' | 'fav_sel_'
-    done_cb: 'fav_add_done' | 'fav_sel_done' | ...
+    done_cb: 'fav_add_done' | 'fav_sel_done' | 'fav_del_done'
     """
     btns = [
         InlineKeyboardButton(
@@ -717,12 +717,14 @@ def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per
         for i in range(1, total + 1)
     ]
     rows = distribute_buttons_equally(btns, max_per_row=max_per_row)
-    rows.append([InlineKeyboardButton("Fertig", callback_data=done_cb)])
+    footer_label = done_label_some if selected else done_label_empty
+    rows.append([InlineKeyboardButton(footer_label, callback_data=done_cb)])
     return InlineKeyboardMarkup(rows)
+
 
 def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=8, done_cb="fav_del_done")
+    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=7, done_cb="fav_del_done")
 
 def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
@@ -3900,21 +3902,46 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.user_data["fav_selection"] = selected
 
-    # Aufräumen: Auswahlnachrichten löschen
-    msg_info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
-    await asyncio.sleep(2)
+    # (optional) kurzes Feedback
+    try:
+        msg_info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
+        await asyncio.sleep(1.2)
+        try:
+            await msg_info.delete()
+        except:
+            pass
+    except:
+        pass
 
+    # alte Favoriten-Flow-Nachrichten wegräumen
     for mid in context.user_data.get("fav_msgs", []):
         try:
             await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
         except:
             pass
-    try:
-        await msg_info.delete()
-    except:
-        pass
+    context.user_data["fav_msgs"] = []
 
-    return ConversationHandler.END
+    # Übersicht neu zeichnen und im Flow bleiben
+    uid = str(q.from_user.id)
+    ensure_favorites_loaded(uid)
+    favs = favorites.get(uid, [])
+    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"▪️{escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+
+    m1 = await q.message.reply_text(pad_message(txt))
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Selektieren", callback_data="fav_action_select"),
+        InlineKeyboardButton("Entfernen",   callback_data="fav_action_remove"),
+        InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+    ]])
+    m2 = await q.message.reply_text(
+        "Was möchtest Du machen?\n\n"
+        "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n\n"
+        "❌ Favoriten aus Liste <b>entfernen</b>\n\n"
+        "⏪ <b>Zurück</b> zum Hauptmenü",
+        reply_markup=kb
+    )
+    context.user_data["fav_msgs"] = [m1.message_id, m2.message_id]
+    return FAV_OVERVIEW
 
 
 async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3976,7 +4003,39 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("fav_del_sel", None)
 
     # WICHTIG: Keine neue Übersicht, kein Aktionsmenü – Flow sauber beenden
-    return ConversationHandler.END
+    # Auswahl zurücksetzen
+    context.user_data.pop("fav_del_sel", None)
+
+    #  ➜  Übersicht direkt wieder anzeigen und im State bleiben
+    ensure_favorites_loaded(uid)
+    favs = favorites.get(uid, [])
+    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"▪️{escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+
+    # alte Favoriten-Flow-Nachrichten sicher wegräumen
+    for list_key in ("fav_msgs", "fav_add_msgs"):
+        for mid in context.user_data.get(list_key, []):
+            try:
+                await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data[list_key] = []
+
+    m1 = await q.message.reply_text(pad_message(txt))
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Selektieren", callback_data="fav_action_select"),
+        InlineKeyboardButton("Entfernen",   callback_data="fav_action_remove"),
+        InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+    ]])
+    m2 = await q.message.reply_text(
+        "Was möchtest Du machen?\n\n"
+        "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n\n"
+        "❌ Favoriten aus Liste <b>entfernen</b>\n\n"
+        "⏪ <b>Zurück</b> zum Hauptmenü",
+        reply_markup=kb
+    )
+    context.user_data["fav_msgs"] = [m1.message_id, m2.message_id]
+    return FAV_OVERVIEW
+
 
 
 async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
