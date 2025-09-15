@@ -504,7 +504,7 @@ def build_new_run_banner() -> str:
     wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
     wday = wdays[now.weekday()]
     stamp = now.strftime("%d. %b %Y")
-    return f"<u><b>Neustart: {wday}, {stamp}</b></u>"
+    return f"🔄<u><b>Neustart: {wday}, {stamp}</b></u>"
 
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
 
@@ -726,7 +726,16 @@ def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboard
 
 def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_add_", total=total, selected=selected, max_per_row=7, done_cb="fav_add_done")
+    return _build_numbers_keyboard(
+        prefix="fav_add_",
+        total=total,
+        selected=selected,
+        max_per_row=7,
+        done_cb="fav_add_done",
+        done_label_empty="Keines",      # <- leer: "Keines"
+        done_label_some="✔️ Fertig",    # <- mit Auswahl: "✔️ Fertig"
+    )
+
 
 # NEW — Text abkürzen (ASCII-„...“), feste maximale Länge
 def _truncate_label(text: str, max_len: int) -> str:
@@ -3751,9 +3760,9 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]])
     m2 = await msg.reply_text(
         "Was möchtest Du machen?\n\n"
-        "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n"
-        "❌ Favoriten aus Liste <b>entfernen</b>\n"
-        "⏪ <b>Zurück</b> zum Hauptmenü\n",
+        "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n\n"
+        "❌ Favoriten aus Liste <b>entfernen</b>\n\n"
+        "⏪ <b>Zurück</b> zum Hauptmenü",
         reply_markup=kb
     )
     context.user_data["fav_msgs"].extend([m1.message_id, m2.message_id])
@@ -3815,7 +3824,7 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     if q.data == "fav_action_remove":
-        # Direkt Entfernen starten – simuliert wie früher "Ja"
+        # Direkt Entfernen starten
         favs = favorites.get(uid, [])
         if not favs:
             await msg.reply_text("Du hast aktuell keine Favoriten gespeichert.")
@@ -3823,17 +3832,19 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 
         context.user_data["fav_total"] = len(favs)
         context.user_data["fav_del_sel"] = set()
-        list_msg = await msg.reply_text(
-            "Welche Favoriten möchtest Du entfernen?\n" +
-            "\n".join(f"{i}. {d}" for i, d in enumerate(favs, start=1))
+
+        text = "Welche Favoriten möchtest Du <b>entfernen</b>?\n" + "\n".join(
+            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
         )
-        sel_msg = await msg.reply_text(
-            "Wähle Nummern (Mehrfachauswahl) und klicke »Fertig«:",
+        list_msg = await msg.reply_text(
+            pad_message(text),
             reply_markup=build_fav_numbers_keyboard(len(favs), set())
         )
-        context.user_data["fav_msgs"].extend([list_msg.message_id, sel_msg.message_id])
-        #return FAV_ADD_SELECT
+
+        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
+        context.user_data["fav_msgs"] = [list_msg.message_id]
         return FAV_DELETE_SELECT
+
 
 
     if q.data == "fav_action_select":
@@ -3845,16 +3856,18 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["fav_total"] = len(favs)
         context.user_data["fav_sel_sel"] = set()
 
-        list_msg = await msg.reply_text(
-            "Welche Favoriten möchtest Du Deiner Gerichteliste hinzufügen?\n" +
-            "\n".join(f"{i}. {d}" for i, d in enumerate(favs, start=1))
+        text = "Welche Favoriten möchtest für den Gerichtevorschlag <b>selektieren</b>?\n" + "\n".join(
+            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
         )
-        sel_msg = await msg.reply_text(
-            "Wähle Nummern (Mehrfachauswahl) und klicke »Fertig«:",
+        list_msg = await msg.reply_text(
+            pad_message(text),
             reply_markup=build_fav_selection_keyboard(len(favs), set())
         )
-        context.user_data["fav_msgs"].extend([list_msg.message_id, sel_msg.message_id])
+
+        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
+        context.user_data["fav_msgs"] = [list_msg.message_id]
         return FAV_ADD_SELECT
+
 
 
 
@@ -3872,7 +3885,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not selected:
         msg_warn = await q.message.reply_text("⚠️ Keine Favoriten ausgewählt.")
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         for mid in context.user_data.get("fav_msgs", []):
             try:
@@ -3889,7 +3902,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Aufräumen: Auswahlnachrichten löschen
     msg_info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
 
     for mid in context.user_data.get("fav_msgs", []):
         try:
