@@ -326,6 +326,36 @@ def format_amount(q):
 def confirm_menus_question(count: int) -> str:
     return "Passt das Gericht?" if count == 1 else "Passen diese Gerichte?"
 
+# ---- Debounced Redraw für 'Definiere Aufwand' ----
+async def _debounced_aufwand_render(q, context):
+    # schon ein Render geplant?
+    task = context.user_data.get("aufw_render_task")
+    if task and not task.done():
+        # nur markieren, dass ein neuer Stand vorhanden ist
+        context.user_data["aufw_dirty"] = True
+        return
+
+    context.user_data["aufw_dirty"] = True
+
+    async def _runner():
+        try:
+            # kurzer Puffer für schnelle Mehrfachklicks
+            await asyncio.sleep(0.12)
+            if context.user_data.get("aufw_dirty"):
+                context.user_data["aufw_dirty"] = False
+                verteilung = context.user_data["aufwand_verteilung"]
+                total = context.user_data["menu_count"]
+                await q.message.edit_reply_markup(
+                    reply_markup=build_aufwand_keyboard(verteilung, total)
+                )
+        except Exception:
+            pass
+        finally:
+            context.user_data["aufw_render_task"] = None
+
+    context.user_data["aufw_render_task"] = asyncio.create_task(_runner())
+
+
 def load_json(filename):
     try:
         with open(filename, encoding="utf-8") as f:
@@ -2576,16 +2606,23 @@ def build_aufwand_keyboard(verteilung: dict, total: int) -> InlineKeyboardMarkup
     rows = [
         zeile("Leicht", "light"),
         zeile("Mittel", "medium"),
-        zeile("Aufwändig", "heavy")
+        zeile("Aufwändig", "heavy"),
     ]
 
     summe = sum(verteilung.values())
     if summe == total:
-        rows.append([InlineKeyboardButton("✅ Weiter", callback_data="aufwand_done")])
+        rows.append([
+            InlineKeyboardButton("🎲 Zufall", callback_data="aufwand_rand"),
+            InlineKeyboardButton("✅ Weiter", callback_data="aufwand_done"),
+        ])
     else:
-        rows.append([InlineKeyboardButton(f"{summe}/{total} gewählt", callback_data="noop")])
+        rows.append([
+            InlineKeyboardButton("🎲 Zufall", callback_data="aufwand_rand"),
+            InlineKeyboardButton(f"{summe}/{total} gewählt", callback_data="noop"),
+        ])
 
     return InlineKeyboardMarkup(rows)
+
 
 
 
@@ -2801,10 +2838,23 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 changed = True
 
         if changed:
-            await query.message.edit_reply_markup(
-                reply_markup=build_aufwand_keyboard(verteilung, total)
-            )
+            await _debounced_aufwand_render(query, context)
 
+        return MENU_AUFWAND
+
+    elif data == "aufwand_rand":
+        # zufällige Verteilung auf 3 Klassen, Summe = total
+        total = context.user_data["menu_count"]
+        # drei Klassen gleichwahrscheinlich
+        picks = [random.choice(("light", "medium", "heavy")) for _ in range(total)]
+        verteilung["light"]  = picks.count("light")
+        verteilung["medium"] = picks.count("medium")
+        verteilung["heavy"]  = picks.count("heavy")
+
+        # sofort neu rendern
+        await query.message.edit_reply_markup(
+            reply_markup=build_aufwand_keyboard(verteilung, total)
+        )
         return MENU_AUFWAND
 
     elif data == "aufwand_done":
