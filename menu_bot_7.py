@@ -1442,7 +1442,7 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
-    text = "Wie viele Gerichte soll ich zusammenstellen?"
+    text = pad_message("Wie viele Gerichte soll ich Dir zusammenstellen?")
 
     # a) Bei echtem Seitenwechsel: nur ReplyMarkup editen
     if q and data in ("menu_count_page_high", "menu_count_page_low"):
@@ -1817,7 +1817,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-        reply = "🥣 Deine Gerichte (1):\n" + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
+        reply = "🥣 <u>Mein Vorschlag:</u>\n" + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
         # Nachricht 1 senden + tracken
         msg1 = await update.message.reply_text(pad_message(reply))
         context.user_data["flow_msgs"].append(msg1.message_id)
@@ -2938,7 +2938,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 3) Neue Liste als eigene Nachricht senden + tracken
         menutext = "\n".join(f"{i}. {g}" for i, g in enumerate(menues, 1))
-        msg1 = await q.message.reply_text(pad_message(f"🥣 Deine Gerichte (2):\n{menutext}"))
+        msg1 = await q.message.reply_text(pad_message(f"🥣 <u> Neuer Vorschlag:</u>\n{menutext}"))
         context.user_data["flow_msgs"].append(msg1.message_id)
 
         # 4) Frage separat senden + tracken
@@ -3591,7 +3591,7 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
             wtag = wdays[now.weekday()]
             stamp = now.strftime("%d. %B.%Y")
-            info = await context.bot.send_message(chat_id, pad_message(f"<b>Neustart: {wtag}, {stamp}</b>"))
+            info = await context.bot.send_message(chat_id, pad_message(f"🔄 <u><b>Neustart: {wtag}, {stamp}</b></u>"))
             await asyncio.sleep(0.5)
         except Exception:
             pass
