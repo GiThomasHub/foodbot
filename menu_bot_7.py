@@ -323,6 +323,8 @@ def format_amount(q):
     # Sonst normalize, um überflüssige Nullen zu entfernen
     return format(qd2.normalize(), 'f')
 
+def confirm_menus_question(count: int) -> str:
+    return "Passt das Gericht?" if count == 1 else "Passen diese Gerichte?"
 
 def load_json(filename):
     try:
@@ -1488,7 +1490,7 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
-    text = pad_message("Wie viele Gerichte soll ich Dir zusammenstellen?")
+    text = pad_message("Wie viele Gerichte soll ich vorschlagen?")
 
     # a) Bei echtem Seitenwechsel: nur ReplyMarkup editen
     if q and data in ("menu_count_page_high", "menu_count_page_low"):
@@ -1720,9 +1722,8 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
                 InlineKeyboardButton("Nein", callback_data="confirm_no"),
             ]])
-            msg2 = await update.message.reply_text(
-                pad_message("Passen diese Gerichte?"), reply_markup=confirm_kb
-            )
+            question = confirm_menus_question(len(final_gerichte))
+            msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
             context.user_data["flow_msgs"].append(msg2.message_id)
             return ASK_CONFIRM
 
@@ -1873,7 +1874,8 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Nein", callback_data="confirm_no"),
         ]])
         # Nachricht 2 senden + tracken
-        msg2 = await update.message.reply_text(pad_message("Passen diese Gerichte?"), reply_markup=confirm_kb)
+        question = confirm_menus_question(len(final_gerichte))
+        msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
         context.user_data["flow_msgs"].append(msg2.message_id)
 
         return ASK_CONFIRM
@@ -1945,7 +1947,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"▪️ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2247,7 +2249,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for dish in sessions[uid]["menues"]:
             sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
             side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
-            text      += f"▪️ {escape(format_dish_with_sides(dish, side_names))}\n"
+            text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2436,7 +2438,7 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for dish in sessions[uid]["menues"]:
             nums = sessions[uid].get("beilagen", {}).get(dish, [])
             names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-            text += f"▪️ {escape(format_dish_with_sides(dish, names))}\n"
+            text += f"‣ {escape(format_dish_with_sides(dish, names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2491,7 +2493,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ].tolist()
             # Grammatik-korrekte Verkettung
             formatted = format_dish_with_sides(dish, beiname)
-            reply += f"▪️ {escape(formatted)}\n"
+            reply += f"‣ {escape(formatted)}\n"
     else:
         reply += "ℹ️ Keine aktive Session."
     await update.message.reply_text(reply)
@@ -2992,7 +2994,8 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Ja",   callback_data="swap_ok"),
             InlineKeyboardButton("Nein", callback_data="swap_again"),
         ]])
-        msg2 = await q.message.reply_text(pad_message("Passen diese Gerichte?"), reply_markup=confirm_kb)
+        question = confirm_menus_question(len(final_gerichte))
+        msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
         context.user_data["flow_msgs"].append(msg2.message_id)
 
         return TAUSCHE_CONFIRM
@@ -3065,7 +3068,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"▪️ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await q.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
@@ -3165,10 +3168,10 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw = str(r["Menge_raw"]).strip()
             if not raw.replace(".", "").isdigit():
                 txt = raw or "wenig"
-                line = f"▪️ {r.Zutat}: {txt}"
+                line = f"‣ {r.Zutat}: {txt}"
             else:
                 amt  = format_amount(r.Menge)
-                line = f"▪️ {r.Zutat}: {amt} {r.Einheit}"
+                line = f"‣ {r.Zutat}: {amt} {r.Einheit}"
             eink_text += f"{line}\n"
 
     # ---- Kochliste (Gericht gefolgt von Zutaten) ----
@@ -3753,7 +3756,7 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Übersicht senden und ID speichern
 # Übersicht senden und ID speichern
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"▪️{escape(d)}" for d in favs)
+    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"‣{escape(d)}" for d in favs)
     m1 = await msg.reply_text(pad_message(txt))
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Selektieren", callback_data="fav_action_select"),
@@ -3934,7 +3937,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
         uid = str(q.from_user.id)
         ensure_favorites_loaded(uid)
         favs = favorites.get(uid, [])
-        txt = "⭐ Deine Favoriten:\n" + "\n".join(f"▪️{escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+        txt = "⭐ Deine Favoriten:\n" + "\n".join(f"‣{escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -3994,13 +3997,13 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q   = update.callback_query
     await q.answer()
     uid = str(q.from_user.id)
+    chat_id = q.message.chat.id
 
-    # Auswahl lesen (robust in absteigender Reihenfolge löschen)
+    # Auswahl lesen
     sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
 
     ensure_favorites_loaded(uid)
     favs = favorites.get(uid, [])
-
     removed = 0
     for idx in sel:
         if 1 <= idx <= len(favs):
@@ -4011,49 +4014,21 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         favorites[uid] = favs
         store_set_favorites(user_key(int(uid)), favorites[uid])
 
-    # Feedback 2 Sek. anzeigen
-    try:
-        msg = await q.message.reply_text(
-            f"🗑️ {removed} Favoriten entfernt." if removed else "⚠️ Keine Favoriten entfernt."
-        )
-        await asyncio.sleep(2.0)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-    # Alle Favoriten-Flow-Nachrichten wegräumen (egal aus welchem der zwei Flows)
-    for list_key in ("fav_msgs", "fav_add_msgs"):
-        for mid in context.user_data.get(list_key, []):
-            try:
-                await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
-            except Exception:
-                pass
-        context.user_data[list_key] = []
-
-       # Auswahl zurücksetzen
-    context.user_data.pop("fav_del_sel", None)
-
-    chat_id = q.message.chat.id
-
-    # Arbeitsnachrichten (Auswahlliste) wegräumen
+    # 1) Arbeitsnachrichten (Auswahlliste + Buttons) wegräumen
     for mid in context.user_data.get("fav_work_ids", []):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
     context.user_data["fav_work_ids"] = []
+    context.user_data.pop("fav_del_sel", None)
 
-    # Übersicht in-place updaten
+    # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
     ids = context.user_data.get("fav_overview_ids")
-    ensure_favorites_loaded(uid)
-    favs = favorites.get(uid, [])
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"▪️{escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"‣{escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
 
     if ids and "list" in ids and "menu" in ids:
-        # 1) Liste editieren
+        # Liste editieren
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -4064,10 +4039,10 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "not modified" not in str(e):
                 raise
 
-        # 2) Aktionsmenü-Nachricht (Text + Keyboard) erneut setzen
+        # Aktionsmenü-Text/Keyboard unverändert erneut setzen
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Selektieren", callback_data="fav_action_select"),
-            InlineKeyboardButton("Entfernen",   callback_data="fav_action_remove"),
+            InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
+            InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
             InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
         ]])
         try:
@@ -4076,8 +4051,8 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=ids["menu"],
                 text=(
                     "Was möchtest Du machen?\n\n"
-                    "🤩 Favoriten für Gerichteauswahl <b>selektieren</b>\n\n"
-                    "❌ Favoriten aus Liste <b>entfernen</b>\n\n"
+                    "✔️ Favoriten für Gerichteauswahl <b>selektieren</b>\n\n"
+                    "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
                     "⏪ <b>Zurück</b> zum Hauptmenü"
                 ),
                 reply_markup=kb
@@ -4086,7 +4061,26 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "not modified" not in str(e):
                 raise
 
+        # Im Favoriten-Loop bleiben
         return FAV_OVERVIEW
+
+    # 3) Fallback: Falls Übersicht-IDs fehlen, neu zeichnen und merken
+    m1 = await q.message.reply_text(pad_message(txt))
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
+        InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
+        InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+    ]])
+    m2 = await q.message.reply_text(
+        "Was möchtest Du machen?\n\n"
+        "✔️ Favoriten für Gerichteauswahl <b>selektieren</b>\n\n"
+        "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
+        "⏪ <b>Zurück</b> zum Hauptmenü",
+        reply_markup=kb
+    )
+    context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
+    return FAV_OVERVIEW
+
 
     # Fallback: falls keine IDs vorhanden, Übersicht neu erstellen und merken
     m1 = await q.message.reply_text(pad_message(txt))
@@ -4222,7 +4216,7 @@ async def fav_add_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # Favoriten-Übersicht senden
-    txt = "⭐ Deine aktualisierte Favoritenliste:\n" + "\n".join(f"▪️ {d}" for d in favs)
+    txt = "⭐ Deine aktualisierte Favoritenliste:\n" + "\n".join(f"‣ {d}" for d in favs)
     favlist_msg = await msg.reply_text(txt)
     _track_export_msg(context, favlist_msg.message_id)
 
@@ -4346,7 +4340,7 @@ async def rezept_personen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         zutaten = df[df["Gericht"] == dish].copy()
         zutaten["Menge"] *= personen / 4
         zut_text = "\n".join(
-            f"▪️ {row.Zutat}: {format_amount(row.Menge)} {row.Einheit}"
+            f"‣ {row.Zutat}: {format_amount(row.Menge)} {row.Einheit}"
             for _, row in zutaten.iterrows()
         )
 
