@@ -722,18 +722,20 @@ def get_random_gerichte(profile, filters, aufwandsliste, block=None, limit=3, mo
 
 def distribute_buttons_equally(buttons, max_per_row=7):
     total = len(buttons)
-    rows_needed = math.ceil(total / max_per_row)
+    if total == 0:
+        return []  # <- verhindert Division durch 0
 
+    rows_needed = math.ceil(total / max_per_row)
     per_row = total // rows_needed
     extra = total % rows_needed
 
-    rows = []
-    index = 0
+    rows, index = [], 0
     for r in range(rows_needed):
         count = per_row + (1 if r < extra else 0)
         rows.append(buttons[index:index + count])
         index += count
     return rows
+
 
 def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per_row: int, done_cb: str, *, done_label_empty: str = "Fertig", done_label_some:  str = "✔️ Fertig",) -> InlineKeyboardMarkup:
     """
@@ -1970,12 +1972,9 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if codes:
                 side_menus.append(idx)
 
-        # 4a) 0 Beilagen-Menüs: Flow-UI aufräumen → finale Übersicht → Personen
-        # 4a) 0 Beilagen-Menüs: Flow-UI aufräumen → finale Übersicht → Personen
+        # 4a) 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
-            # Nur die bisherige Flow-UI löschen (Session bleibt)
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
-
             text = "🥣 Deine Auswahl:\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
@@ -1983,33 +1982,19 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
-
             return await ask_for_persons(update, context)
 
-        # 4b) Mindestens ein Gericht mit Beilagen → direkt Beilagen-Loop starten
-        if len(side_menus) == 1:
-            context.user_data["menu_list"] = menus
-            context.user_data["to_process"] = side_menus
-            context.user_data["menu_idx"]   = 0
-            return await ask_beilagen_for_menu(query, context)
-
-        # Mehrere Menüs → Nummernauswahl (Mehrfachauswahl + Fertig)
-        context.user_data["menu_list"] = menus
-        buttons = []
-        for i, gericht in enumerate(menus, start=1):
-            codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-            if not codes or codes == [0]:
-                continue
-            buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
-        buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
-        kb = [buttons[j:j+4] for j in range(0, len(buttons), 4)]
+        # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Ja",   callback_data="ask_yes"),
+            InlineKeyboardButton("Nein", callback_data="ask_no"),
+        ]])
         msg = await query.message.reply_text(
-            pad_message("Für welche Menüs? (Mehrfachauswahl, dann Fertig)"),
-            reply_markup=InlineKeyboardMarkup(kb)
+            pad_message("Möchtest Du Beilagen hinzufügen?"),
+            reply_markup=kb
         )
         context.user_data["flow_msgs"].append(msg.message_id)
-        context.user_data["selected_menus"] = set()
-        return SELECT_MENUES
+        return ASK_BEILAGEN
 
 
     if query.data == "confirm_no":
@@ -3131,7 +3116,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if codes:
                 side_menus.append(idx)
 
-        # 0 Beilagen-Menüs
+        # 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
             for mid in context.user_data.get("flow_msgs", []):
                 try:
@@ -3149,30 +3134,18 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
 
-        # 1 Beilagen-Menü
-        if len(side_menus) == 1:
-            context.user_data["menu_list"] = menus
-            context.user_data["to_process"] = side_menus
-            context.user_data["menu_idx"]    = 0
-            return await ask_beilagen_for_menu(q, context)
-
-        # >1 Beilagen-Menüs → direkt Mehrfachauswahl starten
-        context.user_data["menu_list"] = menus
-        buttons = []
-        for i, gericht in enumerate(menus, start=1):
-            codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-            if not codes or codes == [0]:
-                continue
-            buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
-        buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
-        kb = [buttons[j:j+4] for j in range(0, len(buttons), 4)]
+        # >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Ja",   callback_data="ask_yes"),
+            InlineKeyboardButton("Nein", callback_data="ask_no"),
+        ]])
         msg = await q.message.reply_text(
-            pad_message("Für welche Menüs? (Mehrfachauswahl, dann Fertig)"),
-            reply_markup=InlineKeyboardMarkup(kb)
+            pad_message("Möchtest Du Beilagen hinzufügen?"),
+            reply_markup=kb
         )
         context.user_data["flow_msgs"].append(msg.message_id)
-        context.user_data["selected_menus"] = set()
-        return SELECT_MENUES
+        return ASK_BEILAGEN
+
 
 
     return ConversationHandler.END
