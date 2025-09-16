@@ -2303,30 +2303,45 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ))
         ]
 
-        # 4b) Mindestens ein Gericht mit Beilagen → direkt Beilagen-Loop starten
+        # --- NEU: 0 Gerichte mit Beilagen → Loop komplett überspringen ---
+        if len(side_menus) == 0:
+            await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+            text = "🥣 Deine finale Liste:\n"
+            for dish in menus:
+                sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
+                side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
+                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+            msg = await query.message.reply_text(pad_message(text))
+            context.user_data["flow_msgs"].append(msg.message_id)
+            return await ask_for_persons(update, context)
+
+        # 1 Gericht → direkt in die Beilagenselektion
         if len(side_menus) == 1:
             context.user_data["menu_list"] = menus
-            context.user_data["to_process"] = side_menus
+            context.user_data["to_process"] = side_menus              # 0-basierte Indizes
             context.user_data["menu_idx"]   = 0
             return await ask_beilagen_for_menu(query, context)
 
-        # Mehrere Menüs → Nummernauswahl (Mehrfachauswahl + Fertig)
+        # >1 Gerichte → zuerst fragen, für welche
         context.user_data["menu_list"] = menus
-        buttons = []
+        context.user_data["selected_menus"] = set()
+
+        number_buttons = []
         for i, gericht in enumerate(menus, start=1):
             codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-            if not codes or codes == [0]:
-                continue
-            buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
-        buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
-        kb = [buttons[j:j+4] for j in range(0, len(buttons), 4)]
+            if any(c != 0 for c in codes):
+                number_buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
+
+        rows = distribute_buttons_equally(number_buttons, max_per_row=4)
+        rows.append([InlineKeyboardButton("Fertig", callback_data="select_done")])
+
         msg = await query.message.reply_text(
             pad_message("Für welche Menüs? (Mehrfachauswahl, dann Fertig)"),
-            reply_markup=InlineKeyboardMarkup(kb)
+            reply_markup=InlineKeyboardMarkup(rows)
         )
         context.user_data["flow_msgs"].append(msg.message_id)
-        context.user_data["selected_menus"] = set()
         return SELECT_MENUES
+
 
 
     return BEILAGEN_SELECT
@@ -2408,12 +2423,22 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "select_done":
         if not sel:
-            await query.message.reply_text("⚠️ Keine Menüs ausgewählt. Abbruch.")
-            return ConversationHandler.END
-        context.user_data["to_process"] = sorted(sel)  # sel ist bereits 0-basiert
-        #context.user_data["to_process"] = sorted(sel)                                     #herausgenommen am 10/09 aufgrund *Nebenfix". falls nciht geht, wieder reinnehmen
-        context.user_data["menu_idx"] = 0
+            # Nichts ausgewählt = Beilagenloop überspringen → direkt Personen
+            await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+            uid = str(query.from_user.id)
+            text = "🥣 Deine finale Liste:\n"
+            for dish in sessions[uid]["menues"]:
+                nums       = sessions[uid].get("beilagen", {}).get(dish, [])
+                side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
+                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+            msg = await query.message.reply_text(pad_message(text))
+            context.user_data["flow_msgs"].append(msg.message_id)
+            return await ask_for_persons(update, context)
+
+        context.user_data["to_process"] = sorted(sel)  # 0-basierte Indizes
+        context.user_data["menu_idx"]   = 0
         return await ask_beilagen_for_menu(query, context)
+
 
     idx = int(data.split("_")[1]) - 1
     if idx in sel:
@@ -2421,18 +2446,19 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         sel.add(idx)
 
-    buttons = []
+    number_buttons = []
     for i, gericht in enumerate(menus, start=1):
-        # Codes parsen und nur weiter, wenn mindestens ein Code ≠ 0 existiert
         codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
         if not codes or codes == [0]:
             continue
         mark = " ✅" if (i-1) in sel else ""
-        buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
-    buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
-    kb = distribute_buttons_equally(buttons, max_per_row=4)
-    await query.message.edit_reply_markup(InlineKeyboardMarkup(kb))
+        number_buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
+
+    rows = distribute_buttons_equally(number_buttons, max_per_row=4)
+    rows.append([InlineKeyboardButton("Fertig", callback_data="select_done")])
+    await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
     return SELECT_MENUES
+
 
 
 async def ask_showlist_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
