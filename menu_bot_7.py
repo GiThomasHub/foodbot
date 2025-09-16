@@ -2423,7 +2423,7 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "select_done":
         if not sel:
-            # Nichts ausgewählt = Beilagenloop überspringen → direkt Personen
+            # Beilagenloop überspringen → direkt Personen
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
             uid = str(query.from_user.id)
             text = "🥣 Deine finale Liste:\n"
@@ -2440,6 +2440,7 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await ask_beilagen_for_menu(query, context)
 
 
+
     idx = int(data.split("_")[1]) - 1
     if idx in sel:
         sel.remove(idx)
@@ -2448,9 +2449,11 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     number_buttons = []
     for i, gericht in enumerate(menus, start=1):
+
         codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-        if not codes or codes == [0]:
+        if not any(c != 0 for c in codes):
             continue
+
         mark = " ✅" if (i-1) in sel else ""
         number_buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
 
