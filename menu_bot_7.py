@@ -889,9 +889,10 @@ def lade_beilagen():
     df["Nummer"] = df["Nummer"].astype(int)
     return df
 
-def parse_codes(s: str):
-    return [int(x.strip()) for x in s.split(",") if x.strip().isdigit()]
-
+def parse_codes(s: str) -> list[int]:
+    if s is None:
+        return []
+    return [int(m) for m in re.findall(r"\d+", str(s))]
 
 
 def lade_zutaten():
@@ -2360,7 +2361,8 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
 
     # 2) Beilage-Codes aus df_gerichte lesen und parsen
     raw = df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0]
-    codes = parse_codes(raw)
+    codes = [c for c in parse_codes(raw) if c != 0]
+
 
     # 3) Erlaubte Nummern ermitteln
     erlaubt = set()
