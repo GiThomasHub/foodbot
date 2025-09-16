@@ -2367,9 +2367,9 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         number_buttons = []
         for i, gericht in enumerate(menus, start=1):
-            codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-            if any(c != 0 for c in codes):
+            if allowed_sides_for_dish(gericht):
                 number_buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
+
 
         rows = distribute_buttons_equally(number_buttons, max_per_row=4)
         rows.append([InlineKeyboardButton("Fertig", callback_data="select_done")])
@@ -2486,13 +2486,11 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     number_buttons = []
     for i, gericht in enumerate(menus, start=1):
-
-        codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-        if not any(c != 0 for c in codes):
+        if not allowed_sides_for_dish(gericht):
             continue
-
         mark = " ✅" if (i-1) in sel else ""
         number_buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
+
 
     rows = distribute_buttons_equally(number_buttons, max_per_row=4)
     rows.append([InlineKeyboardButton("Fertig", callback_data="select_done")])
@@ -3174,13 +3172,28 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except:
                 pass
 
+        # 🔑 Ephemere Keys sicher resetten (sonst alte Auswahl hängen geblieben)
+        for k in ("menu_list", "to_process", "menu_idx", "allowed_beilage_codes", "selected_menus"):
+            context.user_data.pop(k, None)
+            
         # jetzt gleiche Beilagen-Logik wie oben in menu_confirm_cb:
         menus = sessions[uid]["menues"]
-        side_menus = []
-        for idx, dish in enumerate(menus):
-            codes = [c for c in get_beilagen_codes_for(dish) if c != 0]
-            if codes:
-                side_menus.append(idx)
+        side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+        if show_debug_for(update):
+            lines = []
+            for dish in menus:
+                try:
+                    raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
+                    raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
+                except Exception:
+                    raw = "<err>"
+                codes = parse_codes(raw)
+                nz = [c for c in codes if c != 0]
+                allowed = sorted(list(allowed_sides_for_dish(dish)))[:12]
+                lines.append(f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed} (n={len(allowed)})")
+            dbg = "DEBUG Beilagenvorprüfung (nach Tausch):\n" + "\n".join(lines)
+            msg_dbg = await q.message.reply_text(dbg)
+            context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
 
         # 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
