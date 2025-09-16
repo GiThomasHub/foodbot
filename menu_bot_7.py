@@ -804,6 +804,25 @@ def build_fav_add_keyboard_dishes(
     rows.append([InlineKeyboardButton(footer_label, callback_data="fav_add_done")])
     return InlineKeyboardMarkup(rows)
 
+def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based: set[int], *, max_len: int = 35) -> InlineKeyboardMarkup:
+    """
+    Einspaltige Buttons mit Gerichtsnamen für den Beilagen-Preselect-Schritt.
+    - zeigt nur Gerichte, die überhaupt Beilagen erlauben
+    - markiert selektierte mit '✅ ' vor dem Namen
+    - Footer: 'Fertig' / '✔️ Fertig' (wenn >=1 ausgewählt)
+    Hinweis: selected_zero_based enthält 0-basierte Indizes.
+    """
+    rows = []
+    for i, name in enumerate(dishes, start=1):
+        if not allowed_sides_for_dish(name):
+            continue
+        label_base = _truncate_label(name, max_len)
+        label = ("✅ " if (i - 1) in selected_zero_based else "") + label_base
+        rows.append([InlineKeyboardButton(label, callback_data=f"select_{i}")])
+
+    footer_label = "✔️ Fertig" if selected_zero_based else "Fertig"
+    rows.append([InlineKeyboardButton(footer_label, callback_data="select_done")])
+    return InlineKeyboardMarkup(rows)
 
 # ============================================================================================
 
@@ -2361,25 +2380,18 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["menu_idx"]   = 0
             return await ask_beilagen_for_menu(query, context)
 
-        # >1 Gerichte → zuerst fragen, für welche
+        # >1 Gerichte → zuerst fragen, für welche (Namensbuttons, Mehrfachauswahl)
         context.user_data["menu_list"] = menus
-        context.user_data["selected_menus"] = set()
+        context.user_data["selected_menus"] = set()  # 0-basierte Indizes
 
-        number_buttons = []
-        for i, gericht in enumerate(menus, start=1):
-            if allowed_sides_for_dish(gericht):
-                number_buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
-
-
-        rows = distribute_buttons_equally(number_buttons, max_per_row=4)
-        rows.append([InlineKeyboardButton("Fertig", callback_data="select_done")])
-
+        kb = build_menu_select_keyboard_for_sides(menus, context.user_data["selected_menus"], max_len=35)
         msg = await query.message.reply_text(
-            pad_message("Für welche Menüs? (Mehrfachauswahl, dann Fertig)"),
-            reply_markup=InlineKeyboardMarkup(rows)
+            pad_message("Für welche Gerichte?"),
+            reply_markup=kb
         )
         context.user_data["flow_msgs"].append(msg.message_id)
         return SELECT_MENUES
+
 
 
 
@@ -2484,18 +2496,12 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         sel.add(idx)
 
-    number_buttons = []
-    for i, gericht in enumerate(menus, start=1):
-        if not allowed_sides_for_dish(gericht):
-            continue
-        mark = " ✅" if (i-1) in sel else ""
-        number_buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
-
-
-    rows = distribute_buttons_equally(number_buttons, max_per_row=4)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="select_done")])
-    await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+    # Nach dem Toggle: Keyboard mit Namensbuttons neu rendern
+    await query.message.edit_reply_markup(
+        reply_markup=build_menu_select_keyboard_for_sides(menus, sel, max_len=35)
+    )
     return SELECT_MENUES
+
 
 
 
