@@ -1754,7 +1754,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
                 InlineKeyboardButton("Nein", callback_data="confirm_no"),
             ]])
-            question = confirm_menus_question(len(final_gerichte))
+            question = confirm_menus_question(len(ausgewaehlt))
             msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
             context.user_data["flow_msgs"].append(msg2.message_id)
             return ASK_CONFIRM
@@ -3042,15 +3042,17 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["flow_msgs"].append(msg1.message_id)
 
         # 4) Frage separat senden + tracken
-        confirm_kb = InlineKeyboardMarkup([[
+        confirm_kb = InlineKeyboardMarkup([[ 
             InlineKeyboardButton("Ja",   callback_data="swap_ok"),
             InlineKeyboardButton("Nein", callback_data="swap_again"),
         ]])
-        question = confirm_menus_question(len(final_gerichte))
-        msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
+        menus = sessions[uid]["menues"]  # FIX: richtige Liste holen
+        question = confirm_menus_question(len(menus))  # FIX: keine undef. Variable
+        msg2 = await q.message.reply_text(pad_message(question), reply_markup=confirm_kb)  # FIX: q.message statt update.message
         context.user_data["flow_msgs"].append(msg2.message_id)
 
         return TAUSCHE_CONFIRM
+
 
 
 
