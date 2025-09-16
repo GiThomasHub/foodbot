@@ -3253,27 +3253,31 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ze_parts.append(f"{row['Zutat']} {amt} {row['Einheit']}")
         ze_html = escape(", ".join(ze_parts))
 
-        # Titel (mit optionalem Link) + Aufwandlabel
-        link_value = get_link_for(g)
+        # Titel (mit Link, wenn vorhanden) + Dauer (robust)
 
+        # 1) Dauer robust per int-Map (kein String-Mismatch)
+        aufwand_raw = get_aufwand_for(g)  # int (1/2/3) oder None
+        label_map   = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+        aufwand_txt = label_map.get(aufwand_raw, "")
+        aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>" if aufwand_txt else ""
+
+        # 2) Link robust machen (falls http/https fehlt → https:// ergänzen)
+        raw_link = (get_link_for(g) or "").strip()
+        if raw_link and not raw_link.startswith(("http://", "https://")):
+            raw_link = "https://" + raw_link
+
+        # Link außen, Bold innen (sicher für Telegram-HTML)
         name_html = f"<b>{escape(g)}</b>"
-        if link_value:
-            name_html = f'<b><a href="{escape(link_value, quote=True)}">{escape(g)}</a></b>'
+        if raw_link:
+            name_html = f'<a href="{escape(raw_link, quote=True)}"><b>{escape(g)}</b></a>'
 
         full_title = format_dish_with_sides(g, beilagen_namen)
         rest       = full_title[len(g):] if full_title.startswith(g) else ""
         rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
 
-        aufwand_label_html = ""
-        aufwand_raw = get_aufwand_for(g)
-        mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
-        aufwand_txt = mapping.get(str(aufwand_raw).strip(), "") if aufwand_raw is not None else ""
-        if aufwand_txt:
-            aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
-
-
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
+
 
     # ---- Flow-UI aufräumen (nur flow_msgs) ----
     await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
