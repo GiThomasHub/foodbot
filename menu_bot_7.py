@@ -3226,15 +3226,35 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 line = f"‣ {r.Zutat}: {amt} {r.Einheit}"
             eink_text += f"{line}\n"
 
-    # ---- Kochliste (Gericht gefolgt von Zutaten) ----
-    koch_text = f"\n<b>🍽 <u>Kochliste für {personen} Personen:</u></b>\n"
+    # --- Kochliste mit Hauptgericht- und Beilagen-Zutaten in der richtigen Reihenfolge ---
+    koch_text = f"\n<b><u>🍽 Kochliste für {personen} Personen:</u></b>\n"
+
+    # Schnelle Lookups für Link & Aufwand
+    _link_by_dish    = df_gerichte.set_index("Gericht")["Link"].to_dict()
+    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+    # Session-Aufwand (falls vorhanden) hat Vorrang
+    _aufwand_session = {}
+    try:
+        _aufwand_session = {d: lv for d, lv in zip(ausgew, sessions[user_id].get("aufwand", []))}
+    except Exception:
+        _aufwand_session = {}
+
+    def _normalize_link(v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            return ""
+        if not v.startswith(("http://", "https://")):
+            v = "https://" + v
+        return v
+
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
 
     for g in ausgew:
+        # 1) Beilagen-Namen zum Gericht
         sel_nums       = sessions[user_id].get("beilagen", {}).get(g, [])
-        beilagen_namen = df_beilagen.loc[
-            df_beilagen["Nummer"].isin(sel_nums), "Beilagen"
-        ].tolist()
+        beilagen_namen = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
 
+        # 2) Zutaten für Hauptgericht + Beilagen in Reihenfolge zusammenführen
         part_haupt = zut[(zut["Typ"] == "Gericht") & (zut["Gericht"] == g)]
         parts_list = [part_haupt]
         for b in beilagen_namen:
@@ -3242,6 +3262,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts_list.append(part_b)
         part = pd.concat(parts_list, ignore_index=True)
 
+        # 3) Zutaten-Text (HTML-escapen)
         ze_parts = []
         for _, row in part.iterrows():
             raw = str(row["Menge_raw"]).strip()
@@ -3253,27 +3274,31 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ze_parts.append(f"{row['Zutat']} {amt} {row['Einheit']}")
         ze_html = escape(", ".join(ze_parts))
 
-        # Titel (mit Link, wenn vorhanden) + Dauer (robust)
+        # 4) Titel: Link (falls vorhanden) + Beilagenzusatz + Aufwand-Label
+        #    a) Link robust (https:// ergänzen, falls fehlt)
+        raw_link = _normalize_link(str(_link_by_dish.get(g, "") or ""))
 
-        # 1) Dauer robust per int-Map (kein String-Mismatch)
-        aufwand_raw = get_aufwand_for(g)  # int (1/2/3) oder None
-        label_map   = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-        aufwand_txt = label_map.get(aufwand_raw, "")
-        aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>" if aufwand_txt else ""
-
-        # 2) Link robust machen (falls http/https fehlt → https:// ergänzen)
-        raw_link = (get_link_for(g) or "").strip()
-        if raw_link and not raw_link.startswith(("http://", "https://")):
-            raw_link = "https://" + raw_link
-
-        # Link außen, Bold innen (sicher für Telegram-HTML)
+        #    b) Haupttitel (Link außen, Bold innen: <a><b>…</b></a>)
         name_html = f"<b>{escape(g)}</b>"
         if raw_link:
             name_html = f'<a href="{escape(raw_link, quote=True)}"><b>{escape(g)}</b></a>'
 
+        #    c) Zusatz hinter dem Gerichts-Namen (z.B. " mit Reis und Brokkoli")
         full_title = format_dish_with_sides(g, beilagen_namen)
         rest       = full_title[len(g):] if full_title.startswith(g) else ""
         rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
+
+        #    d) Aufwand zuerst aus der Session, sonst aus df (nur 1/2/3 zulassen)
+        lvl = _aufwand_session.get(g, None)
+        if lvl not in (1, 2, 3):
+            try:
+                lvl = int(_aufwand_by_dish.get(g, 0))
+            except Exception:
+                lvl = 0
+
+        aufwand_label_html = ""
+        if lvl in _label_map:
+            aufwand_label_html = f"<i>{escape(_label_map[lvl])}</i>"
 
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
