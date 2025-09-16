@@ -1754,10 +1754,11 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
                 InlineKeyboardButton("Nein", callback_data="confirm_no"),
             ]])
-            question = confirm_menus_question(len(ausgewaehlt))
+            question = confirm_menus_question(len(final_gerichte))  # <-- KORREKT
             msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
             context.user_data["flow_msgs"].append(msg2.message_id)
             return ASK_CONFIRM
+
 
 
 
@@ -1897,7 +1898,6 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         reply = "🥣 <u>Mein Vorschlag:</u>\n" + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
-        # Nachricht 1 senden + tracken
         msg1 = await update.message.reply_text(pad_message(reply))
         context.user_data["flow_msgs"].append(msg1.message_id)
 
@@ -1905,12 +1905,12 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
             InlineKeyboardButton("Nein", callback_data="confirm_no"),
         ]])
-        # Nachricht 2 senden + tracken
-        question = confirm_menus_question(len(final_gerichte))
+        question = confirm_menus_question(len(ausgewaehlt))  # <-- KORREKT
         msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
         context.user_data["flow_msgs"].append(msg2.message_id)
 
         return ASK_CONFIRM
+
 
 
     except Exception as e:
@@ -1971,6 +1971,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 side_menus.append(idx)
 
         # 4a) 0 Beilagen-Menüs: Flow-UI aufräumen → finale Übersicht → Personen
+        # 4a) 0 Beilagen-Menüs: Flow-UI aufräumen → finale Übersicht → Personen
         if not side_menus:
             # Nur die bisherige Flow-UI löschen (Session bleibt)
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
@@ -1985,12 +1986,31 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             return await ask_for_persons(update, context)
 
-        # 4b) Mindestens ein Gericht mit Beilagen → Beilagenfrage
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ja", callback_data="ask_yes"),
-                                    InlineKeyboardButton("Nein", callback_data="ask_no")]])
-        msg = await query.message.reply_text(pad_message("Möchtest du Beilagen hinzufügen?"), reply_markup=kb)
+        # 4b) Mindestens ein Gericht mit Beilagen → direkt Beilagen-Loop starten
+        if len(side_menus) == 1:
+            context.user_data["menu_list"] = menus
+            context.user_data["to_process"] = side_menus
+            context.user_data["menu_idx"]   = 0
+            return await ask_beilagen_for_menu(query, context)
+
+        # Mehrere Menüs → Nummernauswahl (Mehrfachauswahl + Fertig)
+        context.user_data["menu_list"] = menus
+        buttons = []
+        for i, gericht in enumerate(menus, start=1):
+            codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
+            if not codes or codes == [0]:
+                continue
+            buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
+        buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
+        kb = [buttons[j:j+4] for j in range(0, len(buttons), 4)]
+        msg = await query.message.reply_text(
+            pad_message("Für welche Menüs? (Mehrfachauswahl, dann Fertig)"),
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
         context.user_data["flow_msgs"].append(msg.message_id)
-        return ASK_BEILAGEN
+        context.user_data["selected_menus"] = set()
+        return SELECT_MENUES
+
 
     if query.data == "confirm_no":
         await mark_yes_no(query, False, "confirm_yes", "confirm_no")
