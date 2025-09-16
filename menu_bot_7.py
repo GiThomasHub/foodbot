@@ -894,6 +894,37 @@ def parse_codes(s: str) -> list[int]:
         return []
     return [int(m) for m in re.findall(r"\d+", str(s))]
 
+def allowed_sides_for_dish(dish: str) -> set[int]:
+    """
+    Liefert die final erlaubten Beilagen-Nummern für ein Gericht.
+    Nutzt 99/88/77 (Kategorien) korrekt und filtert 0 heraus.
+    """
+    try:
+        raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
+        raw = str(raw_series.iloc[0]) if not raw_series.empty else ""
+    except Exception:
+        raw = ""
+    base = [c for c in parse_codes(raw) if c != 0]
+
+    # Kategorienlisten aus df_beilagen
+    nums = df_beilagen["Nummer"].astype(int)
+    kh   = set(nums[df_beilagen["Kategorie"] == "Kohlenhydrate"].tolist())
+    gv   = set(nums[df_beilagen["Kategorie"] == "Gemüse"].tolist())
+    all_nums = set(nums.tolist())
+
+    allowed: set[int] = set()
+    if 99 in base:
+        allowed |= (kh | gv)
+    else:
+        if 88 in base:
+            allowed |= kh
+        if 77 in base:
+            allowed |= gv
+        # explizite Nummern, die real existieren
+        allowed |= set(x for x in base if x not in (88, 77, 99) and x in all_nums)
+    return allowed
+
+
 
 def lade_zutaten():
     sheet = client.open_by_key(SHEET_ID).worksheet(SHEET_ZUTATEN)
@@ -1967,11 +1998,23 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
-        side_menus = []
-        for idx, dish in enumerate(menus):
-            codes = [c for c in get_beilagen_codes_for(dish) if c != 0]
-            if codes:
-                side_menus.append(idx)
+        side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+        if show_debug_for(update):
+            lines = []
+            for dish in menus:
+                try:
+                    raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
+                    raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
+                except Exception:
+                    raw = "<err>"
+                codes = parse_codes(raw)
+                nz = [c for c in codes if c != 0]
+                allowed = sorted(list(allowed_sides_for_dish(dish)))[:12]
+                lines.append(f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed} (n={len(allowed)})")
+            dbg = "DEBUG Beilagenvorprüfung:\n" + "\n".join(lines)
+            msg_dbg = await query.message.reply_text(dbg)
+            context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
+
 
         # 4a) 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
@@ -2297,12 +2340,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await mark_yes_no(query, True, "ask_yes", "ask_no")
 
         menus = sessions[uid]["menues"]
-        side_menus = [
-            idx for idx, dish in enumerate(menus)
-            if any(c != 0 for c in parse_codes(
-                df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            ))
-        ]
+        side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
         # --- NEU: 0 Gerichte mit Beilagen → Loop komplett überspringen ---
         if len(side_menus) == 0:
@@ -2359,41 +2397,38 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
     menus = context.user_data["menu_list"]
     gericht = menus[idx]
 
+    if show_debug_for(update_or_query):
+        try:
+            raw_series = df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"]
+            raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
+        except Exception:
+            raw = "<err>"
+        codes = parse_codes(raw)
+        allowed = sorted(list(allowed_sides_for_dish(gericht)))
+        msg_dbg = await update_or_query.message.reply_text(
+            f"DEBUG {gericht}: raw='{raw}' → codes={codes} → allowed={allowed}"
+        )
+        context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
+
     # 2) Beilage-Codes aus df_gerichte lesen und parsen
     raw = df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0]
     codes = [c for c in parse_codes(raw) if c != 0]
 
 
-    # 3) Erlaubte Nummern ermitteln
-    erlaubt = set()
-    if 99 in codes:
-        # sowohl Kategorien Kohlenhydrate & Gemüse, keine spezifischen
-        erlaubt = set(
-            df_beilagen[df_beilagen["Kategorie"].isin(["Kohlenhydrate", "Gemüse"])]["Nummer"]
-        )
-    else:
-        if 88 in codes:
-            erlaubt |= set(df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"])
-            codes = [c for c in codes if c != 88]
-        if 77 in codes:
-            erlaubt |= set(df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"])
-            codes = [c for c in codes if c != 77]
-        erlaubt |= set(codes)
-
-    # Erlaube den späteren Zugriff in beilage_select_cb
+    # 2) Erlaubte Nummern aus zentraler Funktion
+    erlaubt = set(allowed_sides_for_dish(gericht))
     context.user_data["allowed_beilage_codes"] = erlaubt
 
-
-    # 4) Inline-Buttons bauen (max. 3 pro Zeile) + 'Fertig' in eigener Zeile
+    # 3) Inline-Buttons bauen (max. 3/Zeile) + 'Fertig'
     side_buttons = []
-    for num, name, cat in zip(df_beilagen["Nummer"], df_beilagen["Beilagen"], df_beilagen["Kategorie"]):
-        if num in erlaubt:
-            side_buttons.append(
-                InlineKeyboardButton(name, callback_data=f"beilage_{num}")
-            )
+    dfb = df_beilagen.copy()
+    dfb["Nummer"] = dfb["Nummer"].astype(int)  # falls dtype driftet
+    for _, r in dfb[dfb["Nummer"].isin(erlaubt)].iterrows():
+        side_buttons.append(InlineKeyboardButton(str(r["Beilagen"]), callback_data=f"beilage_{int(r['Nummer'])}"))
 
     rows = distribute_buttons_equally(side_buttons, max_per_row=3)
     rows.append([InlineKeyboardButton("Fertig", callback_data="beilage_done")])
+
 
     # 5) Nachricht senden + tracken
     msg = await update_or_query.message.reply_text(
