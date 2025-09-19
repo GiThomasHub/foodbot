@@ -1268,11 +1268,11 @@ def get_welcome_text() -> str:
 def get_overview_text() -> str:
     return (
         "<u>Übersicht der Befehle:</u>\n"
-        "🍲 Menü - Lass Dir leckere Gerichte vorschlagen\n\n"
-        "⚡ QuickOne - Ein Gericht, keine Einschränkungen\n\n"
-        "🔖 Favoriten - Deine Lieblingsgerichte an einem Ort\n\n"
-        "🛠️ Übersicht - Nützliche Infos und Hilfen\n\n"
-        "🔄️ Restart - Starte den Bot jederzeit neu"
+        "🍲 Lass Dir leckere Gerichte vorschlagen\n\n"
+        "⚡ Ein Gericht - ganz schnell\n\n"
+        "🔖 Deine Favoriten\n\n"
+        "🛠️ Nützliche Infos und Hilfen\n\n"
+        "🔄️ Starte jederzeit neu"
     )
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -2585,8 +2585,8 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "🥣 <u>Deine Gerichte(1):</u>\n"
         for dish in sessions[uid]["menues"]:
             nums = sessions[uid].get("beilagen", {}).get(dish, [])
-            names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-            text += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, names))}\n"
+            side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
+            text += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -3983,7 +3983,7 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]])
     m2 = await msg.reply_text(
         "<u>Was möchtest Du machen?</u>\n\n"
-        "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
+        "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
         "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
         "⏪ <b>Zurück</b> zum Hauptmenü",
         reply_markup=kb
@@ -4269,7 +4269,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message_id=ids["menu"],
                 text=(
                     "<u>Was möchtest Du machen?</u>\n\n"
-                    "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
+                    "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
                     "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
                     "⏪ <b>Zurück</b> zum Hauptmenü"
                 ),
