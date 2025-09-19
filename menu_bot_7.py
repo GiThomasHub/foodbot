@@ -2378,11 +2378,11 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Flow-UI löschen (Session behalten)
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-        text = "🥣 <u>Deine Gerichte:</u>\n"
+        text = "🥣 <u>Deine Gerichte(3):</u>\n"
         for dish in sessions[uid]["menues"]:
             sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
             side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
-            text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+            text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2397,11 +2397,11 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # --- NEU: 0 Gerichte mit Beilagen → Loop komplett überspringen ---
         if len(side_menus) == 0:
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
-            text = "🥣 <u>Deine Gerichte:</u>\n"
+            text = "🥣 <u>Deine Gerichte(4):</u>\n"
             for dish in menus:
                 sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
-                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
@@ -2464,16 +2464,27 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
     erlaubt = set(allowed_sides_for_dish(gericht))
     context.user_data["allowed_beilage_codes"] = erlaubt
 
-    # 3) Inline-Buttons bauen (max. 3/Zeile) + 'Fertig'
+    # 3) Auswahl initialisieren (falls noch nicht vorhanden)
+    uid = str(update_or_query.from_user.id)
+    sel = sessions.setdefault(uid, {}).setdefault("beilagen", {}).setdefault(gericht, [])
+
+    # 4) Inline-Buttons bauen (max. 3/Zeile)
     side_buttons = []
     dfb = df_beilagen.copy()
     dfb["Nummer"] = dfb["Nummer"].astype(int)  # falls dtype driftet
     for _, r in dfb[dfb["Nummer"].isin(erlaubt)].iterrows():
-        side_buttons.append(InlineKeyboardButton(str(r["Beilagen"]), callback_data=f"beilage_{int(r['Nummer'])}"))
+        side_buttons.append(
+            InlineKeyboardButton(
+                str(r["Beilagen"]),
+                callback_data=f"beilage_{int(r['Nummer'])}"
+            )
+        )
+
+    # Footer-Label abhängig davon, ob bereits Beilagen selektiert sind
+    footer_label = "Fertig" if sel else "Weiter ohne Beilage"
 
     rows = distribute_buttons_equally(side_buttons, max_per_row=3)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="beilage_done")])
-
+    rows.append([InlineKeyboardButton(footer_label, callback_data="beilage_done")])
 
     # 5) Nachricht senden + tracken
     msg = await update_or_query.message.reply_text(
@@ -2482,11 +2493,6 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
     )
     context.user_data["flow_msgs"].append(msg.message_id)
 
-
-
-    # 6) Auswahl initialisieren
-    uid = str(update_or_query.from_user.id)
-    sessions.setdefault(uid, {}).setdefault("beilagen", {})[gericht] = []
 
     return BEILAGEN_SELECT
 
@@ -2508,11 +2514,11 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Beilagenloop überspringen → direkt Personen
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
             uid = str(query.from_user.id)
-            text = "🥣 <u>Deine Gerichte:</u>\n"
+            text = "🥣 <u>Deine Gerichte(5):</u>\n"
             for dish in sessions[uid]["menues"]:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
@@ -2576,11 +2582,11 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Abschluss: Flow-UI löschen (Session behalten)
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-        text = "🥣 <u>Deine Gerichte:</u>\n"
+        text = "🥣 <u>Deine Gerichte(1):</u>\n"
         for dish in sessions[uid]["menues"]:
             nums = sessions[uid].get("beilagen", {}).get(dish, [])
             names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-            text += f"‣ {escape(format_dish_with_sides(dish, names))}\n"
+            text += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, names))}\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
@@ -2598,11 +2604,17 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for code in context.user_data.get("allowed_beilage_codes", []):
         name = df_beilagen.loc[df_beilagen["Nummer"] == code, "Beilagen"].iloc[0]
         mark = " ✅" if code in sel else ""
-        side_buttons.append(InlineKeyboardButton(f"{mark}{name}", callback_data=f"beilage_{code}"))
+        side_buttons.append(
+            InlineKeyboardButton(f"{mark}{name}", callback_data=f"beilage_{code}")
+        )
+
+    # Footer-Label dynamisch (keine Auswahl → "Weiter ohne Beilage")
+    footer_label = "Fertig" if sel else "Weiter ohne Beilage"
 
     rows = distribute_buttons_equally(side_buttons, max_per_row=3)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="beilage_done")])
+    rows.append([InlineKeyboardButton(footer_label, callback_data="beilage_done")])
     await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+    
     return BEILAGEN_SELECT
 
 
@@ -3244,7 +3256,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
             context.user_data["flow_msgs"].clear()
 
-            text = "🥣 <u>Deine Gerichte(mitEinzug):</u>\n"
+            text = "🥣 <u>Deine Gerichte(2):</u>\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
