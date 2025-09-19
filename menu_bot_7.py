@@ -524,39 +524,30 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
     return first + ("\n" + rest if rest else "")
 
 def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2, wrap_at: int = 60) -> str:
-    """
-    Simuliert hängenden Einzug:
-      • Erste Zeile beginnt mit 'bullet '.
-      • Folgezeilen beginnen auf Höhe des Textanfangs (Einrückung).
-    Hinweis: Telegram HTML schneidet führende NBSPs ab. Workaround: führendes
-    Zero-Width Space voranstellen, damit NBSP erhalten bleiben.
-    """
     from html import unescape as _unescape
-    nbsp = "\u00A0"       # NBSP (sichtbar als Leerraum)
-    zwsp = "\u200B"       # Zero-Width Space (unsichtbar, verhindert Trimming)
-
-    prefix = f"{bullet}{nbsp}"
-    # hängende Einrückung: unsichtbares Zeichen + NBSPs (Bullet + 1 Space + extra)
-    hang   = zwsp + (nbsp * (len(bullet) + 1 + indent_nbsp))
+    nbsp    = "\u00A0"
+    emsp    = "\u2003"  # ← EM SPACE (breiter, wird i.d.R. nicht kollabiert)
+    prefix  = f"{bullet}{nbsp}"
+    hang    = (emsp * (indent_nbsp + 1))  # +1 ≈ für das Leerzeichen nach dem Bullet
 
     words = str(text or "").split()
     if not words:
-        return prefix  # leere Zeile mit Aufzählungszeichen
+        return prefix
 
     lines = []
     cur = prefix + words[0]
     for w in words[1:]:
-        tentative = cur + " " + w
-        # sichtbare Länge grob zählen (NBSP wie Space, Entities zurückwandeln)
+        tentative   = cur + " " + w
         visible_len = len(_unescape(tentative.replace(nbsp, " ")))
         if visible_len > wrap_at:
             lines.append(cur)
-            cur = hang + w
+            cur = hang + w         # ← Folgezeile mit EM-Spaces
         else:
             cur = tentative
 
     lines.append(cur)
     return "\n".join(lines)
+
 
 
 
