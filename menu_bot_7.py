@@ -523,6 +523,38 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
+def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2, wrap_at: int = 60) -> str:
+    """
+    Simuliert hängenden Einzug:
+      • Erste Zeile beginnt mit 'bullet '.
+      • Folgezeilen beginnen mit NBSP-Einrückung auf Höhe des Textanfangs.
+    Achtung: wrap_at ist nur ein grober Richtwert (Telegram nutzt proportionale Schrift).
+    """
+    from html import unescape as _unescape  # lokal, falls modulär genutzt
+    nbsp = "\u00A0"
+    prefix = f"{bullet}{nbsp}"
+    hang   = nbsp * (len(bullet) + 1 + indent_nbsp)
+
+    words = str(text or "").split()
+    if not words:
+        return prefix  # leere Zeile mit Aufzählungszeichen
+
+    lines = []
+    cur = prefix + words[0]
+    for w in words[1:]:
+        # Sichtbare Länge grob zählen (NBSP als normales Leerzeichen behandeln)
+        tentative = cur + " " + w
+        visible_len = len(_unescape(tentative.replace(nbsp, " ")))
+        if visible_len > wrap_at:
+            lines.append(cur)
+            cur = hang + w
+        else:
+            cur = tentative
+
+    lines.append(cur)
+    return "\n".join(lines)
+
+
 # NEW: track IDs von Nachrichten, die wir beim Neustart gezielt löschen wollen
 def _track_export_msg(context: "ContextTypes.DEFAULT_TYPE", msg_id: int) -> None:
     if not isinstance(msg_id, int):
@@ -820,7 +852,7 @@ def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based:
         label = ("✅ " if (i - 1) in selected_zero_based else "") + label_base
         rows.append([InlineKeyboardButton(label, callback_data=f"select_{i}")])
 
-    footer_label = "✔️ Fertig" if selected_zero_based else "Fertig"
+    footer_label = "✔️ Fertig" if selected_zero_based else "(selektiere oben)"
     rows.append([InlineKeyboardButton(footer_label, callback_data="select_done")])
     return InlineKeyboardMarkup(rows)
 
@@ -1641,7 +1673,7 @@ async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["menu_count"] = sel
         context.user_data["aufwand_verteilung"] = {"light": 0, "medium": 0, "heavy": 0}
         await q.message.edit_text(
-            f"Du suchst <b>{sel}</b> Gerichte ✅\nDefiniere deren Aufwand:",
+            f"Du suchst <b>{sel}</b> Gerichte 👍\n\nDefiniere deren Aufwand:",
             reply_markup=build_aufwand_keyboard(context.user_data["aufwand_verteilung"], sel)
         )
         return MENU_AUFWAND
@@ -1800,7 +1832,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-            reply = pad_message("🥣 <u>Mein Vorschlag:</u>\n") + "\n".join(f"{i+1}. {g}" for i, g in enumerate(final_gerichte))
+            reply = pad_message("🥣 <u>Mein Vorschlag(1):</u>\n") + "\n".join(f"{i+1}. {g}" for i, g in enumerate(final_gerichte))
             msg1 = await update.message.reply_text(reply)
             context.user_data["flow_msgs"].append(msg1.message_id)
 
@@ -1951,7 +1983,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-        reply = pad_message("🥣 <u>Mein Vorschlag:</u>\n") + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
+        reply = pad_message("🥣 <u>Mein Vorschlag(2):</u>\n") + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
         msg1 = await update.message.reply_text(pad_message(reply))
         context.user_data["flow_msgs"].append(msg1.message_id)
 
@@ -2689,6 +2721,7 @@ def build_aufwand_keyboard(verteilung: dict, total: int) -> InlineKeyboardMarkup
         zeile("Aufwändig", "heavy"),
     ]
 
+    
     summe = sum(verteilung.values())
     if summe == total:
         rows.append([
@@ -3211,11 +3244,11 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
             context.user_data["flow_msgs"].clear()
 
-            text = "🥣 <u>Deine Gerichte:</u>\n"
+            text = "🥣 <u>Deine Gerichte(mitEinzug):</u>\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
             msg = await q.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
@@ -3740,7 +3773,7 @@ async def restart_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    text = "🔄 Bist Du sicher, dass Du neu starten möchtest?"
+    text = pad_message("🔄 Bist Du sicher?")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Ja",   callback_data="restart_yes"),
          InlineKeyboardButton("Nein", callback_data="restart_no")]
@@ -3764,7 +3797,7 @@ async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await q.answer()
     chat_id = q.message.chat.id
 
-    confirm_text = pad_message("🔄 Bist Du sicher, dass Du neu starten möchtest?")
+    confirm_text = pad_message("🔄 Bist Du sicher?")
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("Ja",   callback_data="restart_yes_ov"),
         InlineKeyboardButton("Nein", callback_data="restart_no_ov"),
