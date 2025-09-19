@@ -527,13 +527,17 @@ def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2,
     """
     Simuliert hängenden Einzug:
       • Erste Zeile beginnt mit 'bullet '.
-      • Folgezeilen beginnen mit NBSP-Einrückung auf Höhe des Textanfangs.
-    Achtung: wrap_at ist nur ein grober Richtwert (Telegram nutzt proportionale Schrift).
+      • Folgezeilen beginnen auf Höhe des Textanfangs (Einrückung).
+    Hinweis: Telegram HTML schneidet führende NBSPs ab. Workaround: führendes
+    Zero-Width Space voranstellen, damit NBSP erhalten bleiben.
     """
-    from html import unescape as _unescape  # lokal, falls modulär genutzt
-    nbsp = "\u00A0"
+    from html import unescape as _unescape
+    nbsp = "\u00A0"       # NBSP (sichtbar als Leerraum)
+    zwsp = "\u200B"       # Zero-Width Space (unsichtbar, verhindert Trimming)
+
     prefix = f"{bullet}{nbsp}"
-    hang   = nbsp * (len(bullet) + 1 + indent_nbsp)
+    # hängende Einrückung: unsichtbares Zeichen + NBSPs (Bullet + 1 Space + extra)
+    hang   = zwsp + (nbsp * (len(bullet) + 1 + indent_nbsp))
 
     words = str(text or "").split()
     if not words:
@@ -542,8 +546,8 @@ def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2,
     lines = []
     cur = prefix + words[0]
     for w in words[1:]:
-        # Sichtbare Länge grob zählen (NBSP als normales Leerzeichen behandeln)
         tentative = cur + " " + w
+        # sichtbare Länge grob zählen (NBSP wie Space, Entities zurückwandeln)
         visible_len = len(_unescape(tentative.replace(nbsp, " ")))
         if visible_len > wrap_at:
             lines.append(cur)
@@ -553,6 +557,7 @@ def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2,
 
     lines.append(cur)
     return "\n".join(lines)
+
 
 
 # NEW: track IDs von Nachrichten, die wir beim Neustart gezielt löschen wollen
@@ -1832,17 +1837,16 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-            reply = pad_message("🥣 <u>Mein Vorschlag(1):</u>\n") + "\n".join(f"{i+1}. {g}" for i, g in enumerate(final_gerichte))
-            msg1 = await update.message.reply_text(reply)
-            context.user_data["flow_msgs"].append(msg1.message_id)
-
+            header = "🥣 <u>Mein Vorschlag:</u>"
+            lines = "\n".join(f"{i+1}. {g}" for i, g in enumerate(final_gerichte))
             confirm_kb = InlineKeyboardMarkup([[  
-                InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
-                InlineKeyboardButton("Nein", callback_data="confirm_no"),
+                InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
+                InlineKeyboardButton("Ändern",  callback_data="confirm_no"),
             ]])
-            question = confirm_menus_question(len(final_gerichte))  # <-- KORREKT
-            msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
-            context.user_data["flow_msgs"].append(msg2.message_id)
+            combined = pad_message(f"{header}\n{lines}")
+            msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
+            context.user_data["flow_msgs"].append(msg.message_id)
+
             return ASK_CONFIRM
 
 
@@ -1983,17 +1987,16 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-        reply = pad_message("🥣 <u>Mein Vorschlag(2):</u>\n") + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
-        msg1 = await update.message.reply_text(pad_message(reply))
-        context.user_data["flow_msgs"].append(msg1.message_id)
-
+        header = "🥣 <u>Mein Vorschlag:</u>"
+        lines = "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
         confirm_kb = InlineKeyboardMarkup([[  
-            InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
-            InlineKeyboardButton("Nein", callback_data="confirm_no"),
+            InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
+            InlineKeyboardButton("Ändern",  callback_data="confirm_no"),
         ]])
-        question = confirm_menus_question(len(ausgewaehlt))  # <-- KORREKT
-        msg2 = await update.message.reply_text(pad_message(question), reply_markup=confirm_kb)
-        context.user_data["flow_msgs"].append(msg2.message_id)
+        combined = pad_message(f"{header}\n{lines}")
+        msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
+        context.user_data["flow_msgs"].append(msg.message_id)
+
 
         return ASK_CONFIRM
 
@@ -2045,8 +2048,12 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # 1) Feedback setzen
         await mark_yes_no(query, True, "confirm_yes", "confirm_no")
 
-        # 2) Nur die Bestätigungs-Nachricht löschen
-        await delete_last_flow_message(context, chat_id, "flow_msgs")
+        # 2)  # Buttons von der Vorschlags-Nachricht entfernen, Liste stehen lassen
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
 
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
@@ -2096,8 +2103,12 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "confirm_no":
         await mark_yes_no(query, False, "confirm_yes", "confirm_no")
 
-        # nur die Bestätigungs-Nachricht löschen
-        await delete_last_flow_message(context, chat_id, "flow_msgs")
+        #  Buttons von der Vorschlags-Nachricht entfernen, Liste stehen lassen
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
 
         # Tausche-Loop starten
         context.user_data["swap_candidates"] = set()
@@ -3160,19 +3171,15 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         # 3) Neue Liste als eigene Nachricht senden + tracken
+        header = "🥣 <u>Neuer Vorschlag:</u>"
         menutext = "\n".join(f"{i}. {g}" for i, g in enumerate(menues, 1))
-        msg1 = await q.message.reply_text(pad_message(f"🥣 <u>Neuer Vorschlag:</u>\n{menutext}"))
-        context.user_data["flow_msgs"].append(msg1.message_id)
-
-        # 4) Frage separat senden + tracken
         confirm_kb = InlineKeyboardMarkup([[ 
-            InlineKeyboardButton("Ja",   callback_data="swap_ok"),
-            InlineKeyboardButton("Nein", callback_data="swap_again"),
+            InlineKeyboardButton("Passt",   callback_data="swap_ok"),
+            InlineKeyboardButton("Ändern",  callback_data="swap_again"),
         ]])
-        menus = sessions[uid]["menues"]  # FIX: richtige Liste holen
-        question = confirm_menus_question(len(menus))  # FIX: keine undef. Variable
-        msg2 = await q.message.reply_text(pad_message(question), reply_markup=confirm_kb)  # FIX: q.message statt update.message
-        context.user_data["flow_msgs"].append(msg2.message_id)
+        msg = await q.message.reply_text(pad_message(f"{header}\n{menutext}"), reply_markup=confirm_kb)
+        context.user_data["flow_msgs"].append(msg.message_id)
+
 
         return TAUSCHE_CONFIRM
 
@@ -3198,10 +3205,12 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         flow = context.user_data.get("flow_msgs", [])
         if flow:
             last_id = flow.pop()
+            # statt Frage löschen: Buttons am Vorschlag entfernen, damit nicht doppelt geklickt wird
             try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
                 pass
+
 
         # 4) Neuer Tausche-Prompt mit leerem Kandidaten-Set
         kb = build_swap_keyboard(sessions[uid]["menues"], context.user_data["swap_candidates"])
@@ -3220,9 +3229,10 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if flow:
             last_id = flow.pop()
             try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
                 pass
+
 
         # 🔑 Ephemere Keys sicher resetten (sonst alte Auswahl hängen geblieben)
         for k in ("menu_list", "to_process", "menu_idx", "allowed_beilage_codes", "selected_menus"):
