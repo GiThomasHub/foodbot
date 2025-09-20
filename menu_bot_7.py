@@ -528,7 +528,7 @@ def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2,
     nbsp    = "\u00A0"
     emsp    = "\u2003"  # ← EM SPACE (breiter, wird i.d.R. nicht kollabiert)
     prefix  = f"{bullet}{nbsp}"
-    hang    = (emsp * (indent_nbsp + 1))  # +1 ≈ für das Leerzeichen nach dem Bullet
+    hang    = "│" + (emsp * (indent_nbsp))  # +1 ≈ für das Leerzeichen nach dem Bullet
 
     words = str(text or "").split()
     if not words:
@@ -785,8 +785,8 @@ def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per
 
 
 def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=7, done_cb="fav_del_done")
+    """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Zurück'/'✔️ Fertig'."""
+    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=7, done_cb="fav_del_done", done_label_empty="Zurück",done_label_some="✔️ Fertig")
 
 def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
@@ -4109,19 +4109,17 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
             selected.append(favs[idx - 1])
 
     if not selected:
-        msg_warn = await q.message.reply_text("⚠️ Keine Favoriten ausgewählt.")
-        await asyncio.sleep(2)
-
-        for mid in context.user_data.get("fav_msgs", []):
+        # Nichts gewählt → wie „Zurück“: Arbeitsnachricht(en) weg, zurück zur Übersicht
+        chat_id = q.message.chat.id
+        for mid in context.user_data.get("fav_work_ids", []):
             try:
-                await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
-            except:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
                 pass
-        try:
-            await msg_warn.delete()
-        except:
-            pass
-        return ConversationHandler.END
+        context.user_data["fav_work_ids"] = []
+
+        # Übersicht (Was möchtest Du machen?) bleibt stehen; im Loop bleiben
+        return FAV_OVERVIEW
 
     context.user_data["fav_selection"] = selected
 
@@ -4233,7 +4231,18 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         favorites[uid] = favs
         store_set_favorites(user_key(int(uid)), favorites[uid])
 
-    # 1) Arbeitsnachrichten (Auswahlliste + Buttons) wegräumen
+        # Kurzmeldung anzeigen, dann zusammen mit der Auswahl-Nachricht wieder entfernen
+        try:
+            info = await q.message.reply_text(f"✅ Du hast {removed} Favorit{'en' if removed != 1 else ''} entfernt.")
+            await asyncio.sleep(2.0)
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Auswahl-Nachrichten (Liste + Buttons) wegräumen, egal ob etwas entfernt wurde oder nicht
     for mid in context.user_data.get("fav_work_ids", []):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -4241,6 +4250,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     context.user_data["fav_work_ids"] = []
     context.user_data.pop("fav_del_sel", None)
+
 
     # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
     ids = context.user_data.get("fav_overview_ids")
@@ -4332,8 +4342,8 @@ async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     return FAV_DELETE_SELECT
 
 def build_fav_selection_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 7 pro Zeile) für Selektions-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(prefix="fav_sel_", total=total, selected=selected, max_per_row=7, done_cb="fav_sel_done")
+    """Zahlen-Buttons (max. 7 pro Zeile) für Selektions-Modus + 'Zurück'/'✔️ Fertig'."""
+    return _build_numbers_keyboard(prefix="fav_sel_", total=total, selected=selected, max_per_row=7, done_cb="fav_sel_done", done_label_empty="Zurück", done_label_some="✔️ Fertig")
 
 
 
