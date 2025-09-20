@@ -523,12 +523,16 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
-def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2, wrap_at: int = 60) -> str:
+def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4, wrap_at: int = 60) -> str:
     from html import unescape as _unescape
-    nbsp    = "\u00A0"
-    emsp    = "\u2003"  # ← EM SPACE (breiter, wird i.d.R. nicht kollabiert)
-    prefix  = f"{bullet}{nbsp}"
-    hang    = "│" + (emsp * (indent_nbsp))  # +1 ≈ für das Leerzeichen nach dem Bullet
+    nbsp = "\u00A0"   # NBSP
+    wj   = "\u2060"   # WORD JOINER (zero-width, verhindert Kollaps)
+    fig  = "\u2007"   # FIGURE SPACE (non-collapsing, monowidth-ish)
+    pipe = "│"        # optische Führung
+
+    prefix = f"{bullet}{nbsp}"
+    # Word-Joiner voranstellen, damit die folgenden Spaces nicht „verschluckt“ werden
+    hang   = pipe + wj + (fig * indent_nbsp)
 
     words = str(text or "").split()
     if not words:
@@ -541,13 +545,12 @@ def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 2,
         visible_len = len(_unescape(tentative.replace(nbsp, " ")))
         if visible_len > wrap_at:
             lines.append(cur)
-            cur = hang + w         # ← Folgezeile mit EM-Spaces
+            cur = hang + w
         else:
             cur = tentative
 
     lines.append(cur)
     return "\n".join(lines)
-
 
 
 
