@@ -2194,101 +2194,43 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # 1) Flow-Nachrichten zurücksetzen
+    # 1) Flow-UI zurücksetzen (nur Nachrichtenliste), Pools nicht mehr nötig
     context.user_data["flow_msgs"] = []
+    context.user_data.pop("quickone_remaining", None)
+    context.user_data.pop("quickone_side_pools", None)  # nicht mehr genutzt
 
-    # 2) Pools nur beim echten Einstieg resetten
-    if (not update.callback_query) or update.callback_query.data == "start_quickone":
-        context.user_data.pop("quickone_remaining", None)
-        context.user_data.pop("quickone_side_pools", None)
-
-    # 3) Gerichtspool initialisieren
-    remaining = context.user_data.get("quickone_remaining")
+    # 2) Gerichtspool initialisieren
     all_dishes = [d for d in df_gerichte["Gericht"].tolist() if isinstance(d, str) and d.strip()]
-    if not remaining:
-        remaining = all_dishes.copy()
+    remaining = context.user_data.get("quickone_remaining") or all_dishes.copy()
 
     # Favoriten (3x) × Aktiv-Gewicht
-    uid       = str(update.effective_user.id)
     user_favs = favorites.get(uid, [])
     wmap      = df_gerichte.set_index("Gericht")["Gewicht"].to_dict()
-    weights   = [ (3 if d in user_favs else 1) * float(wmap.get(d, 1.0)) for d in remaining ]
+    weights   = [(3 if d in user_favs else 1) * float(wmap.get(d, 1.0)) for d in remaining]
 
     dish = random.choices(remaining, weights=weights, k=1)[0]
-
     remaining.remove(dish)
     context.user_data["quickone_remaining"] = remaining
 
-    # 4) Beilagen-Codes filtern und nur wenn vorhanden Pools nutzen
-    raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-    all_codes = parse_codes(raw)
-    codes = [c for c in all_codes if c != 0]
-    if not codes:
-        # keine Beilagen möglich
-        side_nums = []
-    else:
-        # Pools initialisieren
-        side_pools = context.user_data.setdefault("quickone_side_pools", {})
-        if dish not in side_pools:
-            carbs_list = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            veggies_list = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            if 99 in codes:
-                pool = {"carbs": carbs_list.copy(), "veggies": veggies_list.copy()}
-            elif 88 in codes:
-                pool = {"single": carbs_list.copy()}
-            elif 77 in codes:
-                pool = {"single": veggies_list.copy()}
-            else:
-                pool = {"single": codes.copy()}
-            side_pools[dish] = pool
-
-        # aus den Pools ziehen
-        pool = side_pools[dish]
-        if "carbs" in pool and "veggies" in pool:
-            if not pool["carbs"]:
-                pool["carbs"] = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            if not pool["veggies"]:
-                pool["veggies"] = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            c = random.choice(pool["carbs"]); pool["carbs"].remove(c)
-            v = random.choice(pool["veggies"]); pool["veggies"].remove(v)
-            side_nums = [c, v]
-        else:
-            single_pool = pool.get("single", [])
-            if not single_pool:
-                # Pool neu füllen
-                pool["single"] = pool.get("single", []).copy()
-                single_pool = pool["single"]
-            num = random.choice(single_pool); pool["single"].remove(num)
-            side_nums = [num]
-
-    # 5) Namen ermitteln
-    sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
-
-    # 6) Session speichern
+    # 3) Session setzen – KEINE Beilagen mehr vorwählen
     sessions[uid] = {
-        "menues": [dish],
-        "aufwand": [0],
-        "beilagen": {dish: side_nums}
+        "menues":  [dish],
+        "aufwand": [int(df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].iloc[0]) if not df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].empty else 0],
+        "beilagen": {}  # leer lassen; wird erst nach 'Passt' ggf. gesetzt
     }
     persist_session(update)
 
-    # 7) Gericht anzeigen
-    text1 = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n{escape(format_dish_with_sides(dish, sides))}")
-    msg1 = await context.bot.send_message(chat_id, text=pad_message(text1))
-    context.user_data["flow_msgs"].append(msg1.message_id)
-
-    # 8) Frage „Passt das?“
-    buttons = [
+    # 4) Vorschlag + Buttons (in *derselben* Nachricht)
+    text = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n{escape(dish)}")
+    markup = InlineKeyboardMarkup([[
         InlineKeyboardButton("Passt", callback_data="quickone_passt"),
-        InlineKeyboardButton("Neu!", callback_data="quickone_neu"),
-    ]
-    if sides:
-        buttons.append(InlineKeyboardButton("Beilagen neu", callback_data="quickone_beilagen_neu"))
-    markup = InlineKeyboardMarkup([buttons])
-    msg2 = await context.bot.send_message(chat_id, text=pad_message("Passt das?"), reply_markup=markup)
-    context.user_data["flow_msgs"].append(msg2.message_id)
+        InlineKeyboardButton("Neu",   callback_data="quickone_neu"),
+    ]])
+    msg = await context.bot.send_message(chat_id, text=text, reply_markup=markup)
+    context.user_data["flow_msgs"].append(msg.message_id)
 
     return QUICKONE_CONFIRM
+
 
 
 # ─────────── quickone_confirm_cb ───────────
@@ -2301,72 +2243,52 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = q.data
 
     if data == "quickone_passt":
-        # nur letzte Frage löschen
-        await delete_last_flow_message(context, chat_id, "flow_msgs")
-        return await ask_for_persons(update, context)
+        # Buttons in derselben Nachricht optisch markieren (Passt aktiv)
+        await mark_yes_no(q, True, "quickone_passt", "quickone_neu")
+
+        dish = sessions[uid]["menues"][0]
+        allowed = allowed_sides_for_dish(dish)
+
+        # Wenn keine Beilagen möglich → direkt Personen
+        if not allowed:
+            # nur die letzte Flow-Nachricht (mit den Passt/Neu-Buttons) löschen
+            await delete_last_flow_message(context, chat_id, "flow_msgs")
+            return await ask_for_persons(update, context)
+
+        # Es gibt Beilagen → Frage senden (eigene quickone-Callbacks)
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Ja",   callback_data="quickone_ask_yes"),
+            InlineKeyboardButton("Nein", callback_data="quickone_ask_no"),
+        ]])
+        msg = await q.message.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
+        context.user_data["flow_msgs"].append(msg.message_id)
+        return QUICKONE_CONFIRM
+
 
     if data == "quickone_neu":
         # gesamte QuickOne-Flow-UI löschen, States behalten
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
         return await quickone_start(update, context)
 
-    if data == "quickone_beilagen_neu":
-        # Flow-UI weg, States behalten
+    if data == "quickone_ask_no":
+        # visuelles Feedback in der Ja/Nein-Nachricht
+        await mark_yes_no(q, False, "quickone_ask_yes", "quickone_ask_no")
+        # Nur Flow-UI aufräumen (keine Session löschen)
+        await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+        return await ask_for_persons(update, context)
+
+    if data == "quickone_ask_yes":
+        await mark_yes_no(q, True, "quickone_ask_yes", "quickone_ask_no")
+        # Flow-UI wegräumen, Session behalten
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-        # Dynamische Beilagen-Auswahl (unverändert)
+        # QuickOne hat genau 1 Gericht → direkt in die Beilagenselektion für dieses Gericht
         dish = sessions[uid]["menues"][0]
-        side_pools = context.user_data.setdefault("quickone_side_pools", {})
-        pool = side_pools.get(dish)
-        if not pool:
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = parse_codes(raw)
-            carbs_list = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            veggies_list = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            if 99 in codes:
-                pool = {"carbs": carbs_list.copy(), "veggies": veggies_list.copy()}
-            elif 88 in codes:
-                pool = {"single": carbs_list.copy()}
-            elif 77 in codes:
-                pool = {"single": veggies_list.copy()}
-            else:
-                pool = {"single": [c for c in codes if c != 0]}
-            side_pools[dish] = pool
+        context.user_data["menu_list"] = [dish]   # identisch zum Menü-Flow
+        context.user_data["to_process"] = [0]
+        context.user_data["menu_idx"]   = 0
 
-        if "carbs" in pool and "veggies" in pool:
-            if not pool["carbs"]:
-                pool["carbs"] = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            if not pool["veggies"]:
-                pool["veggies"] = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            c = random.choice(pool["carbs"]); pool["carbs"].remove(c)
-            v = random.choice(pool["veggies"]); pool["veggies"].remove(v)
-            side_nums = [c, v]
-        else:
-            single_pool = pool.get("single", [])
-            if not single_pool:
-                pool["single"] = pool.get("single", []).copy()
-                single_pool = pool["single"]
-            num = random.choice(single_pool); pool["single"].remove(num)
-            side_nums = [num]
-
-        sessions[uid]["beilagen"][dish] = side_nums
-        persist_session(update)
-        sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
-
-        text1 = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n{escape(format_dish_with_sides(dish, sides))}")
-        msg1 = await context.bot.send_message(chat_id, text=pad_message(text1))
-        context.user_data["flow_msgs"].append(msg1.message_id)
-
-        buttons = [
-            InlineKeyboardButton("Passt", callback_data="quickone_passt"),
-            InlineKeyboardButton("Neu!", callback_data="quickone_neu"),
-            InlineKeyboardButton("Beilagen neu", callback_data="quickone_beilagen_neu"),
-        ]
-        markup = InlineKeyboardMarkup([buttons])
-        msg2 = await context.bot.send_message(chat_id, text=pad_message("Passt das?"), reply_markup=markup)
-        context.user_data["flow_msgs"].append(msg2.message_id)
-
-        return QUICKONE_CONFIRM
+        return await ask_beilagen_for_menu(q, context)  
 
     return ConversationHandler.END
 
