@@ -2204,12 +2204,27 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 1) Flow-UI zurücksetzen (nur Nachrichtenliste), Pools nicht mehr nötig
     context.user_data["flow_msgs"] = []
-    context.user_data.pop("quickone_remaining", None)
     context.user_data.pop("quickone_side_pools", None)  # nicht mehr genutzt
 
     # 2) Gerichtspool initialisieren
+    # 2) Gerichtspool initialisieren oder weiterverwenden
     all_dishes = [d for d in df_gerichte["Gericht"].tolist() if isinstance(d, str) and d.strip()]
-    remaining = context.user_data.get("quickone_remaining") or all_dishes.copy()
+    remaining = context.user_data.get("quickone_remaining")
+
+    # Nur wenn der Pool noch nie existierte → mit allen Gerichten befüllen
+    if remaining is None:
+        remaining = all_dishes.copy()
+
+    # Wenn der Pool existiert, aber leer ist → Durchgang zu Ende
+    if not remaining:
+        msg = await context.bot.send_message(
+            chat_id,
+            pad_message("⚠️ Es sind keine neuen Gerichte mehr im aktuellen Durchgang.\n"
+                        "Starte bitte neu mit »🔄 Restart«.")
+        )
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+        return QUICKONE_CONFIRM
+
 
     # Favoriten (3x) × Aktiv-Gewicht
     user_favs = favorites.get(uid, [])
@@ -2228,11 +2243,15 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     persist_session(update)
 
-    lvl = get_aufwand_for(dish)
-    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    # bevorzugt Session-Aufwand, sonst df
+    try:
+        lvl = sessions[uid]["aufwand"][0]
+    except Exception:
+        lvl = get_aufwand_for(dish)
 
-    # NEU: Label escapen, weil wir HTML-ParseMode aktiv haben
-    label_txt = _label_map.get(lvl)
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    label_txt  = _label_map.get(lvl)
+
     aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
 
     # 4) Vorschlag + Buttons (in *derselben* Nachricht)
@@ -3811,6 +3830,7 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
         await asyncio.sleep(1.2)
         await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+        context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
     except Exception:
         pass
 
@@ -3855,6 +3875,7 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
             await asyncio.sleep(2.0)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+            context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
         except Exception:
             pass
 
