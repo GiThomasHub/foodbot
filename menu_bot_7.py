@@ -323,8 +323,16 @@ def format_amount(q):
     # Sonst normalize, um überflüssige Nullen zu entfernen
     return format(qd2.normalize(), 'f')
 
-def confirm_menus_question(count: int) -> str:
-    return "Passt das Gericht?" if count == 1 else "Passen diese Gerichte?"
+def dishes_header(count: int, step: int | None = None) -> str:
+    """
+    Baut den Titel für die Gerichte-Liste.
+    - count=1  → 'Dein Gericht:'
+    - count>1  → 'Deine Gerichte:'
+    - step     → optionaler Debug-/Schrittzähler in Klammern, z. B. (3)
+    """
+    base = "Dein Gericht" if count == 1 else "Deine Gerichte"
+    suffix = f"({step})" if step is not None else ""
+    return f"🥣 <u>{base}{suffix}:</u>"
 
 # ---- Debounced Redraw für 'Definiere Aufwand' ----
 async def _debounced_aufwand_render(q, context):
@@ -2220,10 +2228,12 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     persist_session(update)
 
-    # Aufwand der Gerichte ermitteln
-    lvl = get_aufwand_for(dish)  # nutzt deinen bestehenden Helper
+    lvl = get_aufwand_for(dish)
     _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-    aufwand_label = f" <i>{_label_map.get(lvl, '')}</i>" if lvl in _label_map else ""
+
+    # NEU: Label escapen, weil wir HTML-ParseMode aktiv haben
+    label_txt = _label_map.get(lvl)
+    aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
 
     # 4) Vorschlag + Buttons (in *derselben* Nachricht)
     text = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n\n{escape(dish)} {aufwand_label}")
@@ -2310,7 +2320,8 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Flow-UI löschen (Session behalten)
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-        text = "🥣 <u>Deine Gerichte(3):</u>\n"
+        count = len(sessions[uid]["menues"])
+        text  = dishes_header(count, step=2) + "\n"
         for dish in sessions[uid]["menues"]:
             sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
             side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
@@ -2329,7 +2340,8 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # --- NEU: 0 Gerichte mit Beilagen → Loop komplett überspringen ---
         if len(side_menus) == 0:
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
-            text = "🥣 <u>Deine Gerichte(4):</u>\n"
+            count = len(sessions[uid]["menues"])
+            text  = dishes_header(count, step=3) + "\n"
             for dish in menus:
                 sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
@@ -2446,7 +2458,8 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Beilagenloop überspringen → direkt Personen
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
             uid = str(query.from_user.id)
-            text = "🥣 <u>Deine Gerichte(5):</u>\n"
+            count = len(sessions[uid]["menues"])
+            text  = dishes_header(count, step=5) + "\n"
             for dish in sessions[uid]["menues"]:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
@@ -2514,7 +2527,8 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Abschluss: Flow-UI löschen (Session behalten)
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-        text = "🥣 <u>Deine Gerichte(1):</u>\n"
+        count = len(sessions[uid]["menues"])
+        text  = dishes_header(count, step=1) + "\n"
         for dish in sessions[uid]["menues"]:
             nums = sessions[uid].get("beilagen", {}).get(dish, [])
             side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
@@ -3187,7 +3201,8 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
             context.user_data["flow_msgs"].clear()
 
-            text = "🥣 <u>Deine Gerichte(2):</u>\n"
+            count = len(sessions[uid]["menues"])
+            text  = dishes_header(count, step=2) + "\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
@@ -3910,13 +3925,13 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
         InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("⏪ Zurück",      callback_data="fav_action_back")
+        InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back")
     ]])
     m2 = await msg.reply_text(
         "<u>Was möchtest Du machen?</u>\n\n"
         "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
         "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-        "⏪ <b>Zurück</b> zum Hauptmenü",
+        "🔙 <b>Zurück</b> zum Hauptmenü",
         reply_markup=kb
     )
     context.user_data["fav_msgs"].extend([m1.message_id, m2.message_id])
@@ -4099,7 +4114,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
             InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-            InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+            InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
         ]])
         try:
             await context.bot.edit_message_text(
@@ -4109,7 +4124,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
                     "<u>Was möchtest Du machen?</u>\n\n"
                     "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
                     "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-                    "⏪ <b>Zurück</b> zum Hauptmenü"
+                    "🔙 <b>Zurück</b> zum Hauptmenü"
                 ),
                 reply_markup=kb
             )
@@ -4202,7 +4217,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
             InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-            InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+            InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
         ]])
         try:
             await context.bot.edit_message_text(
@@ -4212,7 +4227,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "<u>Was möchtest Du machen?</u>\n\n"
                     "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
                     "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-                    "⏪ <b>Zurück</b> zum Hauptmenü"
+                    "🔙 <b>Zurück</b> zum Hauptmenü"
                 ),
                 reply_markup=kb
             )
@@ -4228,13 +4243,13 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
         InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+        InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
     ]])
     m2 = await q.message.reply_text(
         "<u>Was möchtest Du machen?</u>\n\n"
         "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
         "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-        "⏪ <b>Zurück</b> zum Hauptmenü",
+        "🔙 <b>Zurück</b> zum Hauptmenü",
         reply_markup=kb
     )
     context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
@@ -4246,13 +4261,13 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
         InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("⏪ Zurück",    callback_data="fav_action_back"),
+        InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
     ]])
     m2 = await q.message.reply_text(
         "<u>Was möchtest Du machen?</u>\n\n"
         "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
         "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-        "⏪ <b>Zurück</b> zum Hauptmenü",
+        "🔙 <b>Zurück</b> zum Hauptmenü",
         reply_markup=kb
     )
     context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
