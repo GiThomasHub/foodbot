@@ -1266,10 +1266,10 @@ def get_welcome_text() -> str:
             )
 def get_overview_text() -> str:
     return (
-        "<u>Übersicht der Befehle:</u>\n"
+        "<u>Übersicht der Befehle:</u>\n\n"
         "🍲 Lass Dir leckere Gerichte vorschlagen\n\n"
-        "⚡ Ein Gericht - ganz schnell\n\n"
-        "🔖 Deine Favoriten\n\n"
+        "⚡ Ein Gericht - Wenns schnell geht!\n\n"
+        "🔖 Deine Lieblingsgerichte\n\n"
         "🛠️ Nützliche Infos und Hilfen\n\n"
         "🔄️ Starte jederzeit neu"
     )
@@ -2072,7 +2072,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # 4a) 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
-            text = "🥣 Deine Auswahl:\n"
+            text = "🥣 <u>Deine Auswahl:</u>\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
@@ -2220,11 +2220,16 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     persist_session(update)
 
+    # Aufwand der Gerichte ermitteln
+    lvl = get_aufwand_for(dish)  # nutzt deinen bestehenden Helper
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    aufwand_label = f" <i>{_label_map.get(lvl, '')}</i>" if lvl in _label_map else ""
+
     # 4) Vorschlag + Buttons (in *derselben* Nachricht)
-    text = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n{escape(dish)}")
+    text = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n\n{escape(dish)} {aufwand_label}")
     markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Passt", callback_data="quickone_passt"),
-        InlineKeyboardButton("Neu",   callback_data="quickone_neu"),
+        InlineKeyboardButton("✔️ Passt", callback_data="quickone_passt"),
+        InlineKeyboardButton("🔁 Neu",   callback_data="quickone_neu"),
     ]])
     msg = await context.bot.send_message(chat_id, text=text, reply_markup=markup)
     context.user_data["flow_msgs"].append(msg.message_id)
@@ -4646,6 +4651,7 @@ def main():
         states={
             QUICKONE_START:    [CallbackQueryHandler(quickone_start,    pattern="^start_quickone$")],
             QUICKONE_CONFIRM:  [CallbackQueryHandler(quickone_confirm_cb,pattern="^quickone_")],
+            BEILAGEN_SELECT:   [CallbackQueryHandler(beilage_select_cb,  pattern=r"^beilage_(\d+|done)$")],  # ← NEU
             PERSONS_SELECTION: [CallbackQueryHandler(persons_selection_cb,pattern="^persons_")],
             PERSONS_MANUAL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, persons_manual_cb)],
         },
