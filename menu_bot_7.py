@@ -847,28 +847,17 @@ def format_favorites_grouped(favs: list[str]) -> str:
     """
     Formatiert 'Deine Favoriten:' gruppiert nach Aufwand (1/<30min, 2/30-60min, 3/>60min),
     innerhalb jeder Gruppe alphabetisch (A→Z), nur befüllte Gruppen.
-    Verhalten analog zu fertig_input: kein harter Fallback auf 2.
     """
     header = "⭐ <u>Deine Favoriten:</u>\n"
     labels = {1: "<30min", 2: "30-60min", 3: ">60min"}
 
-    # Lookup wie in fertig_input (DataFrame-Fallback)
-    try:
-        aufwand_map = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-    except Exception:
-        aufwand_map = {}
-
+    # Gruppen vorbereiten
     groups = {1: [], 2: [], 3: []}
     for name in favs:
-        lvl = aufwand_map.get(name, None)
-        try:
-            lvl = int(lvl) if lvl is not None else None
-        except Exception:
-            lvl = None
-
-        if lvl in (1, 2, 3):
-            groups[lvl].append(name)
-        # else: keinen Zwangs-Fallback auf 2 → wie in fertig_input bei unbekanntem Level: kein Label
+        lvl = get_aufwand_for(name)
+        if lvl not in (1, 2, 3):
+            lvl = 2  # Fallback wie im Bot (30-60min)
+        groups[lvl].append(name)
 
     parts = []
     for lvl in (1, 2, 3):
@@ -4696,6 +4685,24 @@ def main():
         allow_reentry=True
     ))
 
+    #### ---- Globale Handler ----
+
+    #app.add_handler(CallbackQueryHandler(start_favs_cb,   pattern="^start_favs$"))
+    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
+    app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
+    app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
+    app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
+    app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
+    app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
+    app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
+    app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
+    app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
+    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
+    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
+
+
 
     #### ---- QuickOne-Conversation ----
 
@@ -4716,6 +4723,8 @@ def main():
         fallbacks=[cancel_handler, reset_handler],
         allow_reentry=True
     ))
+
+
 
     #### ---- Favoriten-Conversation ----
 
@@ -4754,22 +4763,7 @@ def main():
         allow_reentry=True
     ))
 
-    #### ---- Globale Handler ----
 
-    #app.add_handler(CallbackQueryHandler(start_favs_cb,   pattern="^start_favs$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
-    app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
-    app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
-    app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
-    app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
-    app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
-    app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
-    app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
-    app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
-    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
 
 
     #### ---- REZEPT-Conversation ----
