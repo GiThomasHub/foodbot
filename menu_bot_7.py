@@ -4718,7 +4718,6 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("favorit", favorit))
-    #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
     app.add_handler(CommandHandler("delete", delete))
 
 
@@ -4775,22 +4774,6 @@ def main():
         allow_reentry=True
     ))
 
-    #### ---- Globale Handler ----
-
-    #app.add_handler(CallbackQueryHandler(start_favs_cb,   pattern="^start_favs$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
-    app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
-    app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
-    app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
-    app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
-    app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
-    app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
-    app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
-    app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
-    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
 
 
 
@@ -4830,13 +4813,12 @@ def main():
             FAV_OVERVIEW: [
                 CallbackQueryHandler(fav_overview_cb, pattern="^fav_edit_yes$"),
                 CallbackQueryHandler(fav_overview_cb, pattern="^fav_edit_no$"),
-                CallbackQueryHandler(fav_action_choice_cb, pattern="^fav_action_")
+                CallbackQueryHandler(fav_action_choice_cb, pattern=r"^fav_action_(select|remove|back)$")
+
             ],
             FAV_DELETE_SELECT: [
-                CallbackQueryHandler(fav_number_toggle_cb, pattern=r"^fav_del_\d+$"),
-                CallbackQueryHandler(fav_del_done_cb,      pattern="^fav_del_done$"),
-                CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_yes$"),
-                CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_no$")
+                CallbackQueryHandler(fav_del_number_toggle_cb, pattern=r"^fav_del_\d+$"),
+                CallbackQueryHandler(fav_del_done_cb,      pattern="^fav_del_done$")
             ],
             # neu: Favoriten hinzufügen-Loop
             FAV_ADD_SELECT: [
@@ -4849,12 +4831,26 @@ def main():
             ],
 
         },
-        fallbacks=[],
+        fallbacks=[cancel_handler, reset_handler],
         allow_reentry=True
     ))
 
 
+    #### ---- Globale Handler ----
 
+    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
+    app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
+    #app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
+    #app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
+    #app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
+    #app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
+    #app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
+    #app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
+    app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
+    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
+    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
 
     #### ---- REZEPT-Conversation ----
 
