@@ -843,6 +843,37 @@ def build_fav_add_keyboard_dishes(
     rows.append([InlineKeyboardButton(footer_label, callback_data="fav_add_done")])
     return InlineKeyboardMarkup(rows)
 
+def format_favorites_grouped(favs: list[str]) -> str:
+    """
+    Formatiert 'Deine Favoriten:' gruppiert nach Aufwand (1/<30min, 2/30-60min, 3/>60min),
+    innerhalb jeder Gruppe alphabetisch (A→Z), nur befüllte Gruppen.
+    """
+    header = "⭐ <u>Deine Favoriten:</u>\n"
+    labels = {1: "<30min", 2: "30-60min", 3: ">60min"}
+
+    # Gruppen vorbereiten
+    groups = {1: [], 2: [], 3: []}
+    for name in favs:
+        lvl = get_aufwand_for(name)
+        if lvl not in (1, 2, 3):
+            lvl = 2  # Fallback wie im Bot (30-60min)
+        groups[lvl].append(name)
+
+    parts = []
+    for lvl in (1, 2, 3):
+        items = sorted(groups[lvl], key=lambda s: s.lower())
+        if not items:
+            continue
+        block_lines = [f"<u>Aufwand: {labels[lvl]}</u>"]
+        block_lines += [f"‣ {escape(n)}" for n in items]
+        parts.append("\n".join(block_lines))
+
+    if not parts:
+        return header + "—"
+
+    return header + "\n\n".join(parts)
+
+
 def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based: set[int], *, max_len: int = 35) -> InlineKeyboardMarkup:
     """
     Einspaltige Buttons mit Gerichtsnamen für den Beilagen-Preselect-Schritt.
@@ -3941,7 +3972,7 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Übersicht senden und ID speichern
 # Übersicht senden und ID speichern
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs)
+    txt = format_favorites_grouped(favs)
     m1 = await msg.reply_text(pad_message(txt))
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
@@ -4120,7 +4151,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
         uid = str(q.from_user.id)
         ensure_favorites_loaded(uid)
         favs = favorites.get(uid, [])
-        txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+        txt = format_favorites_grouped(favs) if favs else "Keine Favoriten vorhanden."
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -4220,7 +4251,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
     ids = context.user_data.get("fav_overview_ids")
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+    txt = format_favorites_grouped(favs) if favs else "Keine Favoriten vorhanden."
 
     if ids and "list" in ids and "menu" in ids:
         # Liste editieren
@@ -4293,9 +4324,6 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
     return FAV_OVERVIEW
-
-
-
 
 async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
