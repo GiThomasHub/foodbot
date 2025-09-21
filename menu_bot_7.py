@@ -846,25 +846,18 @@ def build_fav_add_keyboard_dishes(
 
 def format_favorites_grouped(favs: list[str]) -> str:
     """
-    Gruppiert 'Deine Favoriten:' nach Aufwand (1/<30min, 2/30-60min, 3/>60min),
+    Formatiert 'Deine Favoriten:' gruppiert nach Aufwand (1/<30min, 2/30-60min, 3/>60min),
     innerhalb jeder Gruppe alphabetisch (A→Z), nur befüllte Gruppen.
-    Aufwand wird wie in der Kochliste aus df_gerichte gemappt.
     """
     header = "⭐ <u>Deine Favoriten:</u>\n"
     labels = {1: "<30min", 2: "30-60min", 3: ">60min"}
 
-    # exakt wie in der Kochliste: Map Gericht -> Aufwand
-    try:
-        aufwand_map = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-    except Exception:
-        aufwand_map = {}
-
+    # Gruppen vorbereiten
     groups = {1: [], 2: [], 3: []}
     for name in favs:
-        # da alle definiert sind, sollte der Fallback nie greifen
-        lvl = int(pd.to_numeric(aufwand_map.get(name, 2), errors="coerce"))
+        lvl = get_aufwand_for(name)
         if lvl not in (1, 2, 3):
-            lvl = 2
+            lvl = 2  # Fallback wie im Bot (30-60min)
         groups[lvl].append(name)
 
     parts = []
@@ -872,10 +865,14 @@ def format_favorites_grouped(favs: list[str]) -> str:
         items = sorted(groups[lvl], key=lambda s: s.lower())
         if not items:
             continue
-        block = [f"<u>Aufwand: {labels[lvl]}</u>"] + [f"‣ {escape(n)}" for n in items]
-        parts.append("\n".join(block))
+        block_lines = [f"<u>Aufwand: {labels[lvl]}</u>"]
+        block_lines += [f"‣ {escape(n)}" for n in items]
+        parts.append("\n".join(block_lines))
 
-    return header + ("—" if not parts else "\n\n".join(parts))
+    if not parts:
+        return header + "—"
+
+    return header + "\n\n".join(parts)
 
 
 def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based: set[int], *, max_len: int = 35) -> InlineKeyboardMarkup:
