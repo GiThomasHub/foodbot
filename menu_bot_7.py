@@ -884,65 +884,6 @@ def format_favorites_grouped(favs: list[str]) -> str:
 
     return header + "\n\n".join(parts)
 
-def build_grouped_numbered_fav_view(favs: list[str]) -> tuple[str, list[str]]:
-    """
-    Baut eine gruppierte, fortlaufend nummerierte Favoritenliste (HTML):
-      <u>Aufwand: <30min</u>
-      1. Gericht A
-      2. Gericht B
-      ...
-      <u>Aufwand: 30–60min</u>
-      3. Gericht C
-      ...
-      <u>Aufwand: >60min</u>
-      5. Gericht D
-    Gibt (text, ordered_list) zurück, wobei ordered_list die Gerichte in der
-    exakten Anzeige-Reihenfolge enthält.
-    Aufwand wird analog zu 'fertig_input' aus df_gerichte gelesen,
-    kein harter Fallback auf 2 (wenn lvl nicht 1/2/3 → wird nicht angezeigt).
-    """
-    labels = {1: "<30min", 2: "30–60min", 3: ">60min"}
-
-    # Lookup wie in fertig_input (DataFrame-Quelle)
-    try:
-        aufwand_map = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-    except Exception:
-        aufwand_map = {}
-
-    groups = {1: [], 2: [], 3: []}
-    for name in favs:
-        lvl = aufwand_map.get(name, None)
-        try:
-            lvl = int(lvl) if lvl is not None else None
-        except Exception:
-            lvl = None
-        if lvl in (1, 2, 3):
-            groups[lvl].append(name)
-
-    # Alphabetisch in jeder Gruppe
-    for lvl in (1, 2, 3):
-        groups[lvl].sort(key=lambda s: s.lower())
-
-    # Text + fortlaufende Nummerierung
-    lines: list[str] = []
-    ordered: list[str] = []
-    counter = 1
-    for lvl in (1, 2, 3):
-        items = groups[lvl]
-        if not items:
-            continue
-        lines.append(f"<u>Aufwand: {labels[lvl]}</u>")
-        for dish in items:
-            lines.append(f"{counter}. {escape(dish)}")
-            ordered.append(dish)
-            counter += 1
-
-    if not lines:
-        return ("⭐ <u>Deine Favoriten:</u>\n—", [])
-
-    text = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(lines)
-    return text, ordered
-
 
 def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based: set[int], *, max_len: int = 35) -> InlineKeyboardMarkup:
     """
@@ -4125,16 +4066,12 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["fav_total"] = len(favs)
         context.user_data["fav_del_sel"] = set()
 
-        # NEU: gruppiert + nummeriert anzeigen und die Anzeige-Reihenfolge merken
-        text, ordered = build_grouped_numbered_fav_view(favs)
-        context.user_data["fav_view_order"] = ordered
-
+        text = "<u>Welche Favoriten möchtest Du <b>entfernen</b>?</u>\n" + "\n".join(
+            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
+        )
         list_msg = await msg.reply_text(
-            pad_message(
-                "<u>Welche Favoriten möchtest Du <b>entfernen</b>?</u>\n\n" + text.split("\n", 1)[1]
-                if text.startswith("⭐ <u>Deine Favoriten:</u>\n") else text
-            ),
-            reply_markup=build_fav_numbers_keyboard(len(ordered), set())
+            pad_message(text),
+            reply_markup=build_fav_numbers_keyboard(len(favs), set())
         )
 
         # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
@@ -4152,20 +4089,19 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["fav_total"] = len(favs)
         context.user_data["fav_sel_sel"] = set()
 
-        # NEU: gruppiert + nummeriert anzeigen und die Anzeige-Reihenfolge merken
-        text, ordered = build_grouped_numbered_fav_view(favs)
-        context.user_data["fav_view_order"] = ordered
-
+        text = "<u>Welche Favoriten möchtest für den Gerichtevorschlag <b>selektieren</b>?</u>\n" + "\n".join(
+            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
+        )
         list_msg = await msg.reply_text(
-            pad_message(
-                "<u>Welche Favoriten möchtest Du für den Gerichtevorschlag <b>selektieren</b>?</u>\n\n" + text.split("\n", 1)[1]
-                if text.startswith("⭐ <u>Deine Favoriten:</u>\n") else text
-            ),
-            reply_markup=build_fav_selection_keyboard(len(ordered), set())
+            pad_message(text),
+            reply_markup=build_fav_selection_keyboard(len(favs), set())
         )
 
+        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
         context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_ADD_SELECT
+
+
 
 
 async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4175,11 +4111,10 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     sel = sorted(context.user_data.get("fav_sel_sel", set()))
     favs = favorites.get(uid, [])
 
-    ordered = context.user_data.get("fav_view_order", favs)
     selected = []
     for idx in sel:
-        if 1 <= idx <= len(ordered):
-            selected.append(ordered[idx - 1])
+        if 1 <= idx <= len(favs):
+            selected.append(favs[idx - 1])
 
     if not selected:
         # Nichts gewählt → wie „Zurück“: Arbeitsnachricht(en) weg, zurück zur Übersicht
@@ -4290,29 +4225,15 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = q.message.chat.id
 
     # Auswahl lesen
-    sel = sorted(context.user_data.get("fav_del_sel", set()))
+    sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
+
     ensure_favorites_loaded(uid)
     favs = favorites.get(uid, [])
-
-    # Mapping: ausgewählte Nummern -> Gerichte in der Anzeige-Reihenfolge
-    ordered = context.user_data.get("fav_view_order", favs)
-    selected_names: list[str] = []
-    for n in sel:
-        if 1 <= n <= len(ordered):
-            selected_names.append(ordered[n - 1])
-
-    # Entfernen per Wert (einmalig), unabhängig von der ursprünglichen Speicher-Reihenfolge
     removed = 0
-    for name in selected_names:
-        try:
-            favs.remove(name)
+    for idx in sel:
+        if 1 <= idx <= len(favs):
+            favs.pop(idx - 1)
             removed += 1
-        except ValueError:
-            pass  # falls bereits entfernt/inkonsistent
-
-    favorites[uid] = favs
-    store_set_favorites(user_key(int(uid)), favorites[uid])
-
 
     if removed > 0:
         favorites[uid] = favs
@@ -4718,6 +4639,7 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("favorit", favorit))
+    #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
     app.add_handler(CommandHandler("delete", delete))
 
 
@@ -4775,8 +4697,6 @@ def main():
     ))
 
 
-
-
     #### ---- QuickOne-Conversation ----
 
     app.add_handler(ConversationHandler(
@@ -4797,8 +4717,6 @@ def main():
         allow_reentry=True
     ))
 
-
-
     #### ---- Favoriten-Conversation ----
 
     app.add_handler(ConversationHandler(
@@ -4813,12 +4731,13 @@ def main():
             FAV_OVERVIEW: [
                 CallbackQueryHandler(fav_overview_cb, pattern="^fav_edit_yes$"),
                 CallbackQueryHandler(fav_overview_cb, pattern="^fav_edit_no$"),
-                CallbackQueryHandler(fav_action_choice_cb, pattern=r"^fav_action_(select|remove|back)$")
-
+                CallbackQueryHandler(fav_action_choice_cb, pattern="^fav_action_")
             ],
             FAV_DELETE_SELECT: [
-                CallbackQueryHandler(fav_del_number_toggle_cb, pattern=r"^fav_del_\d+$"),
-                CallbackQueryHandler(fav_del_done_cb,      pattern="^fav_del_done$")
+                CallbackQueryHandler(fav_number_toggle_cb, pattern=r"^fav_del_\d+$"),
+                CallbackQueryHandler(fav_del_done_cb,      pattern="^fav_del_done$"),
+                CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_yes$"),
+                CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_no$")
             ],
             # neu: Favoriten hinzufügen-Loop
             FAV_ADD_SELECT: [
@@ -4831,26 +4750,27 @@ def main():
             ],
 
         },
-        fallbacks=[cancel_handler, reset_handler],
+        fallbacks=[],
         allow_reentry=True
     ))
 
-
     #### ---- Globale Handler ----
 
+    #app.add_handler(CallbackQueryHandler(start_favs_cb,   pattern="^start_favs$"))
     app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
     app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
-    #app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
-    #app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
-    #app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
-    #app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
-    #app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
-    #app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
+    app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
+    app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
+    app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
+    app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
+    app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
+    app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
     app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
     app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
     app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
     app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
+
 
     #### ---- REZEPT-Conversation ----
 
