@@ -1090,41 +1090,6 @@ def get_aufwand_for(dish: str):
     except Exception:
         return None
 
-# === Aufwand-Helper ===
-
-EFFORT_LABEL_MAP = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-
-def get_effort_level(user_id: str, dish: str) -> int | None:
-    """
-    Ermittelt den Aufwand für ein Gericht:
-    1) Falls vorhanden: Session-Aufwand (sessions[user_id]["menues"] + ["aufwand"])
-    2) Sonst: Fallback auf df_gerichte (via get_aufwand_for)
-    Rückgabe: 1/2/3 oder None
-    """
-    try:
-        sess = sessions.get(user_id) or {}
-        menues = sess.get("menues") or []
-        aufw   = sess.get("aufwand") or []
-        for d, lvl in zip(menues, aufw):
-            if d == dish and lvl in (1, 2, 3):
-                return int(lvl)
-    except Exception:
-        pass
-
-    lvl = get_aufwand_for(dish)  # nutzt bestehende Funktion (df_gerichte-Fallback)
-    try:
-        return int(lvl) if lvl in (1, 2, 3) else None
-    except Exception:
-        return None
-
-def get_effort_label(user_id: str, dish: str) -> str:
-    """
-    Liefert das Anzeigen-Label für den Aufwand, z. B. "(30-60min)"; leerer String wenn unbekannt.
-    """
-    lvl = get_effort_level(user_id, dish)
-    return EFFORT_LABEL_MAP.get(lvl, "")
-
-
 def get_link_for(dish: str) -> str:
     """Optionale Link-URL eines Gerichts, getrimmt (oder '')."""
     row = gi(dish)
@@ -2284,9 +2249,10 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         lvl = get_aufwand_for(dish)
 
-    label_txt = get_effort_label(uid, dish)
-    aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    label_txt  = _label_map.get(lvl)
 
+    aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
 
     # 4) Vorschlag + Buttons (in *derselben* Nachricht)
     text = pad_message(f"🥣 <u>Mein Vorschlag:</u>\n\n{escape(dish)} {aufwand_label}")
@@ -3368,7 +3334,6 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Schnelle Lookups für Link & Aufwand
     _link_by_dish    = df_gerichte.set_index("Gericht")["Link"].to_dict()
     _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-   
     # Session-Aufwand (falls vorhanden) hat Vorrang
     _aufwand_session = {}
     try:
@@ -3425,10 +3390,17 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rest       = full_title[len(g):] if full_title.startswith(g) else ""
         rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
 
-        # d) Aufwand via zentrale Helper (Session → df_gerichte), identische Logik wie zuvor
-        _lab = get_effort_label(user_id, g)
-        aufwand_label_html = f"<i>{escape(_lab)}</i>" if _lab else ""
+        #    d) Aufwand zuerst aus der Session, sonst aus df (nur 1/2/3 zulassen)
+        lvl = _aufwand_session.get(g, None)
+        if lvl not in (1, 2, 3):
+            try:
+                lvl = int(_aufwand_by_dish.get(g, 0))
+            except Exception:
+                lvl = 0
 
+        aufwand_label_html = ""
+        if lvl in _label_map:
+            aufwand_label_html = f"<i>{escape(_label_map[lvl])}</i>"
 
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
@@ -3992,12 +3964,15 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             return None
 
-    # 2) Favoriten nach Aufwand gruppieren (zentraler Helper)
+    # 2) Favoriten nach Aufwand gruppieren
     groups = {1: [], 2: [], 3: []}
     for d in favs:
-        lvl = get_effort_level(user_id, d)
+        lvl = _effort_level_for(d)
         if lvl in (1, 2, 3):
             groups[lvl].append(d)
+        else:
+            # Falls kein valider Aufwand ermittelbar, ignoriere (oder optional separate Gruppe)
+            pass
 
     # 3) Alphabetisch sortieren (case-insensitive) innerhalb jeder Gruppe
     for lvl in (1, 2, 3):
@@ -4008,10 +3983,9 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for lvl in (1, 2, 3):
         if not groups[lvl]:
             continue
-        header = f"<u>Aufwand: {escape(EFFORT_LABEL_MAP[lvl])}</u>"
+        header = f"<u>Aufwand: {escape(_label_map[lvl])}</u>"
         lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
         sections.append(f"{header}\n{lines}")
-
 
     txt = "⭐ <u>Deine Favoriten:</u>\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
 
