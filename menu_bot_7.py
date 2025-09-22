@@ -3939,42 +3939,58 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return ConversationHandler.END
 
-    # Übersicht senden und ID speichern
-    # NEU (analog zur Kochliste in fertig_input)
+    # NEU — Gruppiert nach Aufwand (analog Kochliste in fertig_input)
 
-    # 1) Aufwand-Mapping wie in fertig_input
+    # 1) Mapping & Lookups (identisch zum Ansatz in fertig_input)
     _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
     _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
 
-    # 2) Session-Aufwand mit Vorrang (wie in fertig_input)
+    # Session-Aufwand mit Vorrang (wie in fertig_input)
     try:
         sess = sessions.get(user_id, {})
         _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
     except Exception:
         _aufwand_session = {}
 
-    def _effort_label_for(dish: str) -> str:
+    def _effort_level_for(dish: str) -> int | None:
         # a) zuerst Session
         lvl = _aufwand_session.get(dish, None)
-        if lvl not in (1, 2, 3):
-            # b) sonst DataFrame
-            try:
-                lvl = int(_aufwand_by_dish.get(dish, 0))
-            except Exception:
-                lvl = 0
-        return _label_map.get(lvl, "")
+        if lvl in (1, 2, 3):
+            return int(lvl)
+        # b) sonst DataFrame
+        try:
+            lvl = int(_aufwand_by_dish.get(dish, 0))
+            return lvl if lvl in (1, 2, 3) else None
+        except Exception:
+            return None
 
-    # 3) Text wie in der Kochliste: Gericht + kursives Zeitlabel
-    lines = []
+    # 2) Favoriten nach Aufwand gruppieren
+    groups = {1: [], 2: [], 3: []}
     for d in favs:
-        lab = _effort_label_for(d)
-        if lab:
-            lines.append(f"‣ {escape(d)} <i>{escape(lab)}</i>")
+        lvl = _effort_level_for(d)
+        if lvl in (1, 2, 3):
+            groups[lvl].append(d)
         else:
-            lines.append(f"‣ {escape(d)}")
+            # Falls kein valider Aufwand ermittelbar, ignoriere (oder optional separate Gruppe)
+            pass
 
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(lines)
+    # 3) Alphabetisch sortieren (case-insensitive) innerhalb jeder Gruppe
+    for lvl in (1, 2, 3):
+        groups[lvl].sort(key=lambda s: s.casefold())
+
+    # 4) Text zusammenbauen: Überschrift pro Aufwand, darunter Dreieck-Aufzählung
+    sections = []
+    for lvl in (1, 2, 3):
+        if not groups[lvl]:
+            continue
+        header = f"<u>Aufwand: {escape(_label_map[lvl])}</u>"
+        lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
+        sections.append(f"{header}\n{lines}")
+
+    txt = "⭐ <u>Deine Favoriten:</u>\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
+
     m1 = await msg.reply_text(pad_message(txt))
+
 
     
     kb = InlineKeyboardMarkup([[
