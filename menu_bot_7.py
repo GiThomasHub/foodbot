@@ -233,6 +233,33 @@ def show_debug_for(update: Update) -> bool:
     u = getattr(update, "effective_user", None)
     return bool(u and u.id in admin_ids)
 
+async def _debug_favs_aufwand(update, context, favs: list[str]) -> None:
+    """Nur für Admins: zähle Favoriten je Aufwandklasse und zeige Unknowns."""
+    if not show_debug_for(update):
+        return
+    groups = {1: [], 2: [], 3: []}
+    unknown = []
+    for name in favs:
+        lvl = get_aufwand_for(name)
+        if lvl in (1, 2, 3):
+            groups[lvl].append(name)
+        else:
+            unknown.append(name)
+
+    lines = [
+        "DEBUG Favoriten-Aufwand:",
+        f"Gesamt: {len(favs)}",
+        f"1 (<30min):   {len(groups[1])}",
+        f"2 (30-60min): {len(groups[2])}",
+        f"3 (>60min):   {len(groups[3])}",
+    ]
+    if unknown:
+        lines.append("Unbekannt:    " + ", ".join(unknown))
+
+    out = await update.effective_message.reply_text("\n".join(lines))
+    context.user_data.setdefault("fav_msgs", []).append(out.message_id)
+
+
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
     """Sehr kompaktes Format: Spalten + Zeilen als Liste von Listen."""
@@ -1068,11 +1095,11 @@ except Exception as e:
     _G_INDEX = {}
 
 def gi(name: str):
-    """Schneller Zugriff auf Gerichte-Zeile als dict (oder None)."""
     try:
-        return _G_INDEX.get(name)
+        return _G_INDEX.get(str(name).strip())  # <- Trim
     except Exception:
         return None
+
 
 def get_beilagen_codes_for(dish: str) -> list[int]:
     """Beilagen-Codes eines Gerichts als Liste[int], robust und schnell."""
@@ -1082,13 +1109,13 @@ def get_beilagen_codes_for(dish: str) -> list[int]:
     s = str(row.get("Beilagen") or "").strip()
     return parse_codes(s) if s else []
 
-def get_aufwand_for(dish: str):
-    """Aufwand eines Gerichts als int (1/2/3) oder None."""
+def get_aufwand_for(dish: str) -> int | None:
     row = gi(dish)
     if not row:
         return None
     try:
-        return int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
+        lvl = int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
+        return lvl if lvl in (1, 2, 3) else None
     except Exception:
         return None
 
@@ -3971,8 +3998,9 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return ConversationHandler.END
 
+    await _debug_favs_aufwand(update, context, favs)
     # Übersicht senden und ID speichern
-# Übersicht senden und ID speichern
+    # Übersicht senden und ID speichern
     txt = format_favorites_grouped(favs)
     m1 = await msg.reply_text(pad_message(txt))
     kb = InlineKeyboardMarkup([[
