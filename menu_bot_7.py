@@ -1090,35 +1090,6 @@ def get_aufwand_for(dish: str):
     except Exception:
         return None
 
-def format_favorites_grouped(favs: list[str]) -> str:
-    """
-    Gibt die Favoriten nach Aufwand gruppiert aus, mit genau diesem Layout:
-    - Überschriften (unterstrichen) ohne Aufzählungszeichen:
-        Aufwand: <30min
-        Aufwand: 30-60min
-        Aufwand: >60min
-    - Innerhalb der Kategorie alphabetisch (A→Z)
-    - Gerichte mit Aufzählungszeichen '‣ '
-    - Nutzt get_aufwand_for(...) (bewährte Quelle)
-    """
-    labels = {1: "<30min", 2: "30-60min", 3: ">60min"}
-    groups = {1: [], 2: [], 3: []}
-
-    for name in favs or []:
-        lvl = get_aufwand_for(name)
-        if lvl in (1, 2, 3):
-            groups[lvl].append(name)
-
-    parts: list[str] = []
-    for lvl in (1, 2, 3):
-        parts.append(f"<u>Aufwand: {labels[lvl]}</u>")
-        for dish in sorted(groups[lvl], key=lambda s: s.lower()):
-            parts.append(f"‣ {escape(dish)}")
-        parts.append("")  # Leerzeile zwischen Blöcken
-
-    return "\n".join(parts).rstrip()
-
-
 def get_link_for(dish: str) -> str:
     """Optionale Link-URL eines Gerichts, getrimmt (oder '')."""
     row = gi(dish)
@@ -3969,9 +3940,43 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     # Übersicht senden und ID speichern
-# Übersicht senden und ID speichern
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + format_favorites_grouped(favs)
+    # NEU (analog zur Kochliste in fertig_input)
+
+    # 1) Aufwand-Mapping wie in fertig_input
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+
+    # 2) Session-Aufwand mit Vorrang (wie in fertig_input)
+    try:
+        sess = sessions.get(user_id, {})
+        _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
+    except Exception:
+        _aufwand_session = {}
+
+    def _effort_label_for(dish: str) -> str:
+        # a) zuerst Session
+        lvl = _aufwand_session.get(dish, None)
+        if lvl not in (1, 2, 3):
+            # b) sonst DataFrame
+            try:
+                lvl = int(_aufwand_by_dish.get(dish, 0))
+            except Exception:
+                lvl = 0
+        return _label_map.get(lvl, "")
+
+    # 3) Text wie in der Kochliste: Gericht + kursives Zeitlabel
+    lines = []
+    for d in favs:
+        lab = _effort_label_for(d)
+        if lab:
+            lines.append(f"‣ {escape(d)} <i>{escape(lab)}</i>")
+        else:
+            lines.append(f"‣ {escape(d)}")
+
+    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(lines)
     m1 = await msg.reply_text(pad_message(txt))
+
+    
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
         InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
@@ -4149,7 +4154,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
         uid = str(q.from_user.id)
         ensure_favorites_loaded(uid)
         favs = favorites.get(uid, [])
-        txt = ("⭐ <u>Deine Favoriten:</u>\n" + format_favorites_grouped(favs)) if favs else "Keine Favoriten vorhanden."
+        txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -4249,8 +4254,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
     ids = context.user_data.get("fav_overview_ids")
-    txt = ("⭐ <u>Deine Favoriten:</u>\n" + format_favorites_grouped(favs)) if favs else "Keine Favoriten vorhanden."
-
+    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
 
     if ids and "list" in ids and "menu" in ids:
         # Liste editieren
@@ -4790,6 +4794,7 @@ def main():
     port = int(os.getenv("PORT", "8080"))
     url_path = f"webhook/{(WEBHOOK_SECRET or 'hook')[:16]}"
 
+    from aiohttp import web
 
     async def _health_route(_request):
         return web.Response(text="OK")  # 200
