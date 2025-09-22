@@ -4170,7 +4170,53 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
         uid = str(q.from_user.id)
         ensure_favorites_loaded(uid)
         favs = favorites.get(uid, [])
-        txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+        
+        # === Gruppiert nach Aufwand (analog fav_start/kochliste) mit fortlaufender Nummerierung ===
+        _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+        _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+
+        # Session-Aufwand hat Vorrang (identisch wie in fav_start)
+        try:
+            sess = sessions.get(uid, {})
+            _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
+        except Exception:
+            _aufwand_session = {}
+
+        def _effort_level_for(dish: str) -> int | None:
+            lvl = _aufwand_session.get(dish, None)
+            if lvl in (1, 2, 3):
+                return int(lvl)
+            try:
+                lvl = int(_aufwand_by_dish.get(dish, 0))
+                return lvl if lvl in (1, 2, 3) else None
+            except Exception:
+                return None
+
+        # Favoriten gruppieren
+        _groups = {1: [], 2: [], 3: []}
+        for d in favs:
+            lvl = _effort_level_for(d)
+            if lvl in (1, 2, 3):
+                _groups[lvl].append(d)
+
+        # alphabetisch je Gruppe
+        for k in (1, 2, 3):
+            _groups[k].sort(key=lambda s: s.casefold())
+
+        # Ausgabe mit fortlaufender Nummerierung über alle Gruppen
+        _lines = []
+        _idx = 1
+        for lvl in (1, 2, 3):
+            if not _groups[lvl]:
+                continue
+            _lines.append(f"<u>Aufwand: {escape(_label_map[lvl])}</u>")
+            for d in _groups[lvl]:
+                _lines.append(f"{_idx}. {escape(d)}")
+                _idx += 1
+
+        txt = "⭐ <u><b>Deine Favoriten:</b></u>\n\n" + ("\n".join(_lines) if _lines else "(keine Einträge)")
+
+        
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -4270,7 +4316,48 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
     ids = context.user_data.get("fav_overview_ids")
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
+    
+    # === Gruppiert nach Aufwand (analog fav_start/kochliste) mit fortlaufender Nummerierung ===
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+
+    try:
+        sess = sessions.get(uid, {})
+        _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
+    except Exception:
+        _aufwand_session = {}
+
+    def _effort_level_for(dish: str) -> int | None:
+        lvl = _aufwand_session.get(dish, None)
+        if lvl in (1, 2, 3):
+            return int(lvl)
+        try:
+            lvl = int(_aufwand_by_dish.get(dish, 0))
+            return lvl if lvl in (1, 2, 3) else None
+        except Exception:
+            return None
+
+    _groups = {1: [], 2: [], 3: []}
+    for d in favs:
+        lvl = _effort_level_for(d)
+        if lvl in (1, 2, 3):
+            _groups[lvl].append(d)
+
+    for k in (1, 2, 3):
+        _groups[k].sort(key=lambda s: s.casefold())
+
+    _lines = []
+    _idx = 1
+    for lvl in (1, 2, 3):
+        if not _groups[lvl]:
+            continue
+        _lines.append(f"<u>Aufwand: {escape(_label_map[lvl])}</u>")
+        for d in _groups[lvl]:
+            _lines.append(f"{_idx}. {escape(d)}")
+            _idx += 1
+
+    txt = "⭐ <u>Deine Favoriten:</u>\n\n" + ("\n".join(_lines) if _lines else "(keine Einträge)")
+
 
     if ids and "list" in ids and "menu" in ids:
         # Liste editieren
