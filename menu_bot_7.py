@@ -233,33 +233,6 @@ def show_debug_for(update: Update) -> bool:
     u = getattr(update, "effective_user", None)
     return bool(u and u.id in admin_ids)
 
-async def _debug_favs_aufwand(update, context, favs: list[str]) -> None:
-    """Nur für Admins: zähle Favoriten je Aufwandklasse und zeige Unknowns."""
-    if not show_debug_for(update):
-        return
-    groups = {1: [], 2: [], 3: []}
-    unknown = []
-    for name in favs:
-        lvl = get_aufwand_for(name)
-        if lvl in (1, 2, 3):
-            groups[lvl].append(name)
-        else:
-            unknown.append(name)
-
-    lines = [
-        "DEBUG Favoriten-Aufwand:",
-        f"Gesamt: {len(favs)}",
-        f"1 (<30min):   {len(groups[1])}",
-        f"2 (30-60min): {len(groups[2])}",
-        f"3 (>60min):   {len(groups[3])}",
-    ]
-    if unknown:
-        lines.append("Unbekannt:    " + ", ".join(unknown))
-
-    out = await update.effective_message.reply_text("\n".join(lines))
-    context.user_data.setdefault("fav_msgs", []).append(out.message_id)
-
-
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
     """Sehr kompaktes Format: Spalten + Zeilen als Liste von Listen."""
@@ -869,8 +842,6 @@ def build_fav_add_keyboard_dishes(
     footer_label = "✖️ Keines" if not selected else "✔️ Fertig"
     rows.append([InlineKeyboardButton(footer_label, callback_data="fav_add_done")])
     return InlineKeyboardMarkup(rows)
-    
-
 
 def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based: set[int], *, max_len: int = 35) -> InlineKeyboardMarkup:
     """
@@ -1095,11 +1066,11 @@ except Exception as e:
     _G_INDEX = {}
 
 def gi(name: str):
+    """Schneller Zugriff auf Gerichte-Zeile als dict (oder None)."""
     try:
-        return _G_INDEX.get(str(name).strip())  # <- Trim
+        return _G_INDEX.get(name)
     except Exception:
         return None
-
 
 def get_beilagen_codes_for(dish: str) -> list[int]:
     """Beilagen-Codes eines Gerichts als Liste[int], robust und schnell."""
@@ -1109,13 +1080,13 @@ def get_beilagen_codes_for(dish: str) -> list[int]:
     s = str(row.get("Beilagen") or "").strip()
     return parse_codes(s) if s else []
 
-def get_aufwand_for(dish: str) -> int | None:
+def get_aufwand_for(dish: str):
+    """Aufwand eines Gerichts als int (1/2/3) oder None."""
     row = gi(dish)
     if not row:
         return None
     try:
-        lvl = int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
-        return lvl if lvl in (1, 2, 3) else None
+        return int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
     except Exception:
         return None
 
@@ -1123,36 +1094,6 @@ def get_link_for(dish: str) -> str:
     """Optionale Link-URL eines Gerichts, getrimmt (oder '')."""
     row = gi(dish)
     return str(row.get("Link") or "").strip() if row else ""
-
-def format_favorites_grouped(favs: list[str]) -> str:
-    """
-    Formatiert 'Deine Favoriten:' gruppiert nach Aufwand (1/<30min, 2/30-60min, 3/>60min),
-    innerhalb jeder Gruppe alphabetisch (A→Z), nur befüllte Gruppen.
-    """
-    header = "⭐ <u>Deine Favoriten:</u>\n"
-    labels = {1: "<30min", 2: "30-60min", 3: ">60min"}
-
-    # Gruppen vorbereiten
-    groups = {1: [], 2: [], 3: []}
-    for name in favs:
-        lvl = get_aufwand_for(name)
-        if lvl not in (1, 2, 3):
-            lvl = 2  # Fallback wie im Bot (30-60min)
-        groups[lvl].append(name)
-
-    parts = []
-    for lvl in (1, 2, 3):
-        items = sorted(groups[lvl], key=lambda s: s.lower())
-        if not items:
-            continue
-        block_lines = [f"<u>Aufwand: {labels[lvl]}</u>"]
-        block_lines += [f"‣ {escape(n)}" for n in items]
-        parts.append("\n".join(block_lines))
-
-    if not parts:
-        return header + "—"
-
-    return header + "\n\n".join(parts)
 
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
@@ -3998,10 +3939,9 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return ConversationHandler.END
 
-    await _debug_favs_aufwand(update, context, favs)
     # Übersicht senden und ID speichern
-    # Übersicht senden und ID speichern
-    txt = format_favorites_grouped(favs)
+# Übersicht senden und ID speichern
+    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs)
     m1 = await msg.reply_text(pad_message(txt))
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
@@ -4180,7 +4120,7 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
         uid = str(q.from_user.id)
         ensure_favorites_loaded(uid)
         favs = favorites.get(uid, [])
-        txt = format_favorites_grouped(favs) if favs else "Keine Favoriten vorhanden."
+        txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -4280,7 +4220,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
     ids = context.user_data.get("fav_overview_ids")
-    txt = format_favorites_grouped(favs) if favs else "Keine Favoriten vorhanden."
+    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
 
     if ids and "list" in ids and "menu" in ids:
         # Liste editieren
@@ -4353,6 +4293,9 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
     return FAV_OVERVIEW
+
+
+
 
 async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
