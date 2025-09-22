@@ -4065,73 +4065,26 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     if q.data == "fav_action_remove":
-    if q.data == "fav_action_remove":
+        # Direkt Entfernen starten
         favs = favorites.get(uid, [])
         if not favs:
             await msg.reply_text("Du hast aktuell keine Favoriten gespeichert.")
             return ConversationHandler.END
 
-        # --- Aufwand-Lookup identisch zu fav_start / fertig_input ---
-        _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-        _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-        try:
-            sess = sessions.get(uid, {})
-            _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
-        except Exception:
-            _aufwand_session = {}
-
-        def _effort_level_for(dish: str) -> int | None:
-            lvl = _aufwand_session.get(dish, None)
-            if lvl in (1, 2, 3):
-                return int(lvl)
-            try:
-                lvl = int(_aufwand_by_dish.get(dish, 0))
-                return lvl if lvl in (1, 2, 3) else None
-            except Exception:
-                return None
-
-        # --- Gruppieren & alphabetisch sortieren innerhalb der Gruppen ---
-        groups = {1: [], 2: [], 3: []}
-        for idx, d in enumerate(favs):
-            lvl = _effort_level_for(d)
-            if lvl in (1, 2, 3):
-                groups[lvl].append((d, idx))  # (Name, Original-Index)
-
-        for lvl in (1, 2, 3):
-            groups[lvl].sort(key=lambda t: t[0].casefold())
-
-        # --- Anzeige-Index (1..N) fortlaufend über Gruppen + Mapping speichern ---
-        display_lines = []
-        display_to_original = {}  # 1-based → original favs index
-        running = 1
-        for lvl in (1, 2, 3):
-            if not groups[lvl]:
-                continue
-            display_lines.append(f"<u>Aufwand: {escape(_label_map[lvl])}</u>")
-            for name, orig_idx in groups[lvl]:
-                display_lines.append(f"{running}. {escape(name)}")
-                display_to_original[running] = orig_idx
-                running += 1
-
-        if running == 1:
-            # Keine Gruppe hatte Inhalte
-            await msg.reply_text("Du hast aktuell keine Favoriten gespeichert.")
-            return ConversationHandler.END
-
-        # --- State für Keyboard/Callbacks ---
-        context.user_data["fav_total"] = running - 1
+        context.user_data["fav_total"] = len(favs)
         context.user_data["fav_del_sel"] = set()
-        context.user_data["fav_index_map"] = display_to_original  # wichtig für Done-Callback
 
-        # --- Nachricht + Keyboard senden ---
-        header = "<u>Welche Favoriten möchtest Du <b>entfernen</b>?</u>"
-        list_msg = await msg.reply_text(
-            pad_message(header + "\n" + "\n".join(display_lines)),
-            reply_markup=build_fav_numbers_keyboard(context.user_data["fav_total"], set())
+        text = "<u>Welche Favoriten möchtest Du <b>entfernen</b>?</u>\n" + "\n".join(
+            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
         )
+        list_msg = await msg.reply_text(
+            pad_message(text),
+            reply_markup=build_fav_numbers_keyboard(len(favs), set())
+        )
+
+        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
         context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_DELETE_SELECT
-
 
 
 
@@ -4141,66 +4094,20 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
             await msg.reply_text("Keine Favoriten vorhanden.")
             return ConversationHandler.END
 
-        # --- Aufwand-Lookup identisch zu fav_start / fertig_input ---
-        _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-        _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-        try:
-            sess = sessions.get(uid, {})
-            _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
-        except Exception:
-            _aufwand_session = {}
-
-        def _effort_level_for(dish: str) -> int | None:
-            lvl = _aufwand_session.get(dish, None)
-            if lvl in (1, 2, 3):
-                return int(lvl)
-            try:
-                lvl = int(_aufwand_by_dish.get(dish, 0))
-                return lvl if lvl in (1, 2, 3) else None
-            except Exception:
-                return None
-
-        # --- Gruppieren & alphabetisch sortieren innerhalb der Gruppen ---
-        groups = {1: [], 2: [], 3: []}
-        for idx, d in enumerate(favs):
-            lvl = _effort_level_for(d)
-            if lvl in (1, 2, 3):
-                groups[lvl].append((d, idx))  # (Name, Original-Index)
-
-        for lvl in (1, 2, 3):
-            groups[lvl].sort(key=lambda t: t[0].casefold())
-
-        # --- Anzeige-Index (1..N) fortlaufend über Gruppen + Mapping speichern ---
-        display_lines = []
-        display_to_original = {}  # 1-based → original favs index
-        running = 1
-        for lvl in (1, 2, 3):
-            if not groups[lvl]:
-                continue
-            display_lines.append(f"<u>Aufwand: {escape(_label_map[lvl])}</u>")
-            for name, orig_idx in groups[lvl]:
-                display_lines.append(f"{running}. {escape(name)}")
-                display_to_original[running] = orig_idx
-                running += 1
-
-        if running == 1:
-            await msg.reply_text("Keine Favoriten vorhanden.")
-            return ConversationHandler.END
-
-        # --- State für Keyboard/Callbacks ---
-        context.user_data["fav_total"] = running - 1
+        context.user_data["fav_total"] = len(favs)
         context.user_data["fav_sel_sel"] = set()
-        context.user_data["fav_index_map"] = display_to_original  # wichtig für Done-Callback
 
-        # --- Nachricht + Keyboard senden ---
-        header = "<u>Welche Favoriten möchtest Du für den Gerichtevorschlag <b>selektieren</b>?</u>"
-        list_msg = await msg.reply_text(
-            pad_message(header + "\n" + "\n".join(display_lines)),
-            reply_markup=build_fav_selection_keyboard(context.user_data["fav_total"], set())
+        text = "<u>Welche Favoriten möchtest für den Gerichtevorschlag <b>selektieren</b>?</u>\n" + "\n".join(
+            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
         )
+        list_msg = await msg.reply_text(
+            pad_message(text),
+            reply_markup=build_fav_selection_keyboard(len(favs), set())
+        )
+
+        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
         context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_ADD_SELECT
-
 
 
 
