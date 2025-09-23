@@ -4049,6 +4049,63 @@ async def fav_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return FAV_DELETE_SELECT
 
+# === Favoriten: Gruppieren + fortlaufend nummerieren (für Select/Remove) ===
+def _effort_level_for_fav(uid: str, dish: str) -> int | None:
+    """
+    Einheitliche Aufwandsbestimmung:
+    1) Session-Aufwand (falls vorhanden) hat Vorrang
+    2) sonst Aufwand aus df_gerichte["Aufwand"]
+    """
+    try:
+        sess = sessions.get(uid, {})
+        for d, lvl in zip(sess.get("menues", []), sess.get("aufwand", [])):
+            if d == dish and lvl in (1, 2, 3):
+                return int(lvl)
+    except Exception:
+        pass
+    try:
+        lvl = int(df_gerichte.set_index("Gericht").at[dish, "Aufwand"])
+        return lvl if lvl in (1, 2, 3) else None
+    except Exception:
+        return None
+
+def _build_numbered_grouped_favs(uid: str) -> tuple[str, dict[int, str]]:
+    """
+    Baut den Text für die Select/Remove-Ansichten:
+      - nach Aufwand gruppiert (1..3)
+      - innerhalb der Gruppen alphabetisch
+      - fortlaufend nummeriert 1..N über alle Gruppen
+    Gibt (text_html, index_map) zurück, wobei index_map[i] -> Gericht
+    """
+    favs = favorites.get(uid, []) or []
+    groups = {1: [], 2: [], 3: []}
+    for d in favs:
+        lvl = _effort_level_for_fav(uid, d)
+        if lvl in (1, 2, 3):
+            groups[lvl].append(d)
+
+    # alphabetisch in jeder Gruppe
+    for lvl in (1, 2, 3):
+        groups[lvl].sort(key=lambda s: s.casefold())
+
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    lines = []
+    idx_map: dict[int, str] = {}
+    running = 1
+    for lvl in (1, 2, 3):
+        if not groups[lvl]:
+            continue
+        lines.append(f"<u>Aufwand: {escape(_label_map[lvl])}</u>")
+        for dish in groups[lvl]:
+            lines.append(f"{running}. {escape(dish)}")
+            idx_map[running] = dish
+            running += 1
+        lines.append("")  # Leerzeile zwischen Gruppen
+
+    text = "⭐ <u>Deine Favoriten (Auswahl):</u>\n" + "\n".join(lines).strip()
+    return text, idx_map
+
+
 async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -4065,51 +4122,50 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     if q.data == "fav_action_remove":
-        # Direkt Entfernen starten
+    if q.data == "fav_action_remove":
         favs = favorites.get(uid, [])
         if not favs:
             await msg.reply_text("Du hast aktuell keine Favoriten gespeichert.")
             return ConversationHandler.END
 
-        context.user_data["fav_total"] = len(favs)
-        context.user_data["fav_del_sel"] = set()
+        text, idx_map = _build_numbered_grouped_favs(uid)
+        total = len(idx_map)
 
-        text = "<u>Welche Favoriten möchtest Du <b>entfernen</b>?</u>\n" + "\n".join(
-            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
-        )
+        # State für diesen Remove-Loop
+        context.user_data["fav_total"] = total
+        context.user_data["fav_del_sel"] = set()
+        context.user_data["fav_del_index_map"] = idx_map  # Nummer → Gericht
+
+        # Eine Nachricht mit gruppierter, nummerierter Liste + Zahlen-Keyboard
         list_msg = await msg.reply_text(
             pad_message(text),
-            reply_markup=build_fav_numbers_keyboard(len(favs), set())
+            reply_markup=build_fav_numbers_keyboard(total, set())
         )
-
-        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
         context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_DELETE_SELECT
-
 
 
     if q.data == "fav_action_select":
         favs = favorites.get(uid, [])
         if not favs:
             await msg.reply_text("Keine Favoriten vorhanden.")
-            return ConversationHandler.END
+                return ConversationHandler.END
 
-        context.user_data["fav_total"] = len(favs)
+        text, idx_map = _build_numbered_grouped_favs(uid)
+        total = len(idx_map)
+
+        # State für diesen Select-Loop
+        context.user_data["fav_total"] = total
         context.user_data["fav_sel_sel"] = set()
+        context.user_data["fav_sel_index_map"] = idx_map  # Nummer → Gericht
 
-        text = "<u>Welche Favoriten möchtest für den Gerichtevorschlag <b>selektieren</b>?</u>\n" + "\n".join(
-            f"{i}. {escape(d)}" for i, d in enumerate(favs, start=1)
-        )
+        # Eine Nachricht mit gruppierter, nummerierter Liste + Zahlen-Keyboard
         list_msg = await msg.reply_text(
             pad_message(text),
-            reply_markup=build_fav_selection_keyboard(len(favs), set())
+            reply_markup=build_fav_selection_keyboard(total, set())
         )
-
-        # Merke nur diese EINE Nachricht (Liste + Buttons in einem)
         context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_ADD_SELECT
-
-
 
 
 async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
