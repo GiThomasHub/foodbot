@@ -4754,7 +4754,7 @@ def main():
     #### ---- Globale Handler ----
 
     #app.add_handler(CallbackQueryHandler(start_favs_cb,   pattern="^start_favs$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
+    app.add_handler(CallbackQueryHandler(start_setup_cb, pattern=r"^(start|restart)_setup$"))
     app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
     app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
     app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
@@ -4765,8 +4765,8 @@ def main():
     app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
     app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
-    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
+    #app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))    am 23/9 gelöscht
+
 
 
 
@@ -4800,7 +4800,7 @@ def main():
             CallbackQueryHandler(fav_start,    pattern="^start_favs$"),
             CallbackQueryHandler(fav_start,              pattern="^restart_favs$"),
             # neu: Einstieg über Aktions-Menu
-            CallbackQueryHandler(fav_add_start, pattern="^favoriten$")
+            #CallbackQueryHandler(fav_add_start, pattern="^favoriten$")   gelöscht am 23/9, weil im globalen handler bereits drin...: "Behalte die Verarbeitung im Haupt-ConversationHandler (weil sie logisch dort hingehört) und lösche die Entry-Point-Zeile im Favoriten-Conversation."
         ],
         states={
             FAV_OVERVIEW: [
