@@ -2278,26 +2278,31 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = q.data
 
     if data == "quickone_passt":
-        # Buttons in derselben Nachricht optisch markieren (Passt aktiv)
-        await mark_yes_no(q, True, "quickone_passt", "quickone_neu")
+        # Buttons am Vorschlag entfernen, Text "Mein Vorschlag" beibehalten
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
         dish = sessions[uid]["menues"][0]
         allowed = allowed_sides_for_dish(dish)
 
-        # Wenn keine Beilagen möglich → direkt Personen
+        # Keine Beilagen möglich → direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
         if not allowed:
-            # nur die letzte Flow-Nachricht (mit den Passt/Neu-Buttons) löschen
-            await delete_last_flow_message(context, chat_id, "flow_msgs")
             return await ask_for_persons(update, context)
 
-        # Es gibt Beilagen → Frage senden (eigene quickone-Callbacks)
+        # Beilagen möglich → separate Beilagen-Frage senden (Vorschlag bleibt sichtbar)
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("Ja",   callback_data="quickone_ask_yes"),
             InlineKeyboardButton("Nein", callback_data="quickone_ask_no"),
         ]])
-        msg = await q.message.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
-        context.user_data["flow_msgs"].append(msg.message_id)
+        msg = await q.message.reply_text(
+            pad_message("Möchtest Du Beilagen hinzufügen?"),
+            reply_markup=kb
+        )
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return QUICKONE_CONFIRM
+
 
 
     if data == "quickone_neu":
@@ -2306,24 +2311,45 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await quickone_start(update, context)
 
     if data == "quickone_ask_no":
-        # visuelles Feedback in der Ja/Nein-Nachricht
-        await mark_yes_no(q, False, "quickone_ask_yes", "quickone_ask_no")
-        # Nur Flow-UI aufräumen (keine Session löschen)
-        await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+        # Beilagen-Frage (diese Nachricht) entfernen
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
+        except Exception:
+            pass
+        # Aus flow_msgs entfernen, falls dort gemerkt
+        flow_ids = context.user_data.get("flow_msgs", [])
+        if isinstance(flow_ids, list):
+            try:
+                flow_ids.remove(q.message.message_id)
+            except ValueError:
+                pass
+
+        # Direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
         return await ask_for_persons(update, context)
 
-    if data == "quickone_ask_yes":
-        await mark_yes_no(q, True, "quickone_ask_yes", "quickone_ask_no")
-        # Flow-UI wegräumen, Session behalten
-        await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-        # QuickOne hat genau 1 Gericht → direkt in die Beilagenselektion für dieses Gericht
+    if data == "quickone_ask_yes":
+        # Beilagen-Frage (diese Nachricht) entfernen
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
+        except Exception:
+            pass
+        # Aus flow_msgs entfernen, falls dort gemerkt
+        flow_ids = context.user_data.get("flow_msgs", [])
+        if isinstance(flow_ids, list):
+            try:
+                flow_ids.remove(q.message.message_id)
+            except ValueError:
+                pass
+
+        # QuickOne hat exakt 1 Gericht → direkt in die Beilagen-Auswahl für dieses Gericht
         dish = sessions[uid]["menues"][0]
-        context.user_data["menu_list"] = [dish]   # identisch zum Menü-Flow
+        context.user_data["menu_list"] = [dish]
         context.user_data["to_process"] = [0]
         context.user_data["menu_idx"]   = 0
 
-        return await ask_beilagen_for_menu(q, context)  
+        return await ask_beilagen_for_menu(q, context)
+
 
     return ConversationHandler.END
 
