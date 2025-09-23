@@ -3921,6 +3921,104 @@ async def favorit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===================================== FAVORITEN–FLOW (anschauen & löschen)=============================
+
+def build_fav_overview_text_for(uid: str) -> str:
+    """Erzeugt den Text der initialen Favoriten-Übersicht (wie fav_start)."""
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+
+    # Session-Aufwand hat Vorrang
+    try:
+        sess = sessions.get(uid, {})
+        _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
+    except Exception:
+        _aufwand_session = {}
+
+    def _effort_level_for(d: str) -> int | None:
+        lvl = _aufwand_session.get(d)
+        if lvl in (1, 2, 3):
+            return int(lvl)
+        try:
+            lvl = int(_aufwand_by_dish.get(d, 0))
+            return lvl if lvl in (1, 2, 3) else None
+        except Exception:
+            return None
+
+    favs = favorites.get(uid, []) or []
+    groups = {1: [], 2: [], 3: []}
+    for d in favs:
+        lvl = _effort_level_for(d)
+        if lvl in (1, 2, 3):
+            groups[lvl].append(d)
+
+    for lvl in (1, 2, 3):
+        groups[lvl].sort(key=lambda s: s.casefold())
+
+    sections = []
+    for lvl in (1, 2, 3):
+        if not groups[lvl]:
+            continue
+        header = f"<u>Aufwand: {escape(_label_map[lvl])}</u>"
+        lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
+        sections.append(f"{header}\n{lines}")
+
+    txt = "⭐ <u>Deine Favoriten:</u>\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
+    return txt
+
+
+async def fav_render_overview_in_place(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Aktualisiert die bestehende Favoriten-Übersicht (list/menu) in-place.
+    Falls die alten Messages nicht mehr editierbar sind, fällt auf fav_start() zurück.
+    """
+    q = update.callback_query
+    uid = str(q.from_user.id)
+    chat_id = q.message.chat.id
+    ids = context.user_data.get("fav_overview_ids") or {}
+    list_id = ids.get("list")
+    menu_id = ids.get("menu")
+
+    # Fallback: keine bekannten Overview-IDs -> neu aufbauen
+    if not list_id or not menu_id:
+        await fav_start(update, context)
+        return
+
+    txt = build_fav_overview_text_for(uid)
+
+    action_text = (
+        "<u>Was möchtest Du machen?</u>\n\n"
+        "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
+        "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
+        "🔙 <b>Zurück</b> zum Hauptmenü"
+    )
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
+        InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
+        InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back"),
+    ]])
+
+    # Liste editieren (oder bei Fehler neu senden und IDs aktualisieren)
+    try:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=list_id, text=pad_message(txt))
+    except Exception:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=list_id)
+        except Exception:
+            pass
+        m1 = await context.bot.send_message(chat_id, pad_message(txt))
+        context.user_data.setdefault("fav_overview_ids", {})["list"] = m1.message_id
+
+    # Action-Menü editieren (oder bei Fehler neu senden und IDs aktualisieren)
+    try:
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=menu_id, text=action_text, reply_markup=kb)
+    except Exception:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=menu_id)
+        except Exception:
+            pass
+        m2 = await context.bot.send_message(chat_id, action_text, reply_markup=kb)
+        context.user_data.setdefault("fav_overview_ids", {})["menu"] = m2.message_id
+
 async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry-Point für /meinefavoriten oder Button „Favoriten“."""
     msg = update.message or update.callback_query.message
@@ -4187,12 +4285,15 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("fav_sel_sel", None)
     context.user_data.pop("fav_sel_index_map", None)
 
-    # Auswahl (falls vorhanden) speichern
+    # Auswahl (falls vorhanden) speichern + kurze Info
     if selected:
         context.user_data["fav_selection"] = selected
+        msg_info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
+        await asyncio.sleep(1.2)
 
-    # Immer zurück zur initialen Übersicht (wie fav_start)
-    return await fav_start(update, context)
+    # WICHTIG: keine neue Übersicht senden, einfach zurück in den Overview-State
+    return FAV_OVERVIEW
+
 
 
 async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4223,11 +4324,13 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Welche Gerichte sollen entfernt werden?
     to_remove = {idx_map[i] for i in sel if i in idx_map}
 
+    removed = 0
     if to_remove:
         # Reihenfolge der übrigen Favoriten beibehalten
         favs = [d for d in favs if d not in to_remove]
         favorites[uid] = favs
         store_set_favorites(user_key(int(uid)), favorites[uid])
+        removed = len(to_remove)
 
     # Arbeitsnachrichten (Liste + Keyboard) entfernen
     for mid in context.user_data.get("fav_work_ids", []):
@@ -4239,8 +4342,19 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("fav_del_sel", None)
     context.user_data.pop("fav_del_index_map", None)
 
-    # Immer zurück zur initialen Übersicht (wie fav_start)
-    return await fav_start(update, context)
+    # Kein neues Overview posten!
+    # Wenn etwas entfernt wurde: in-place aktualisieren + Info kurz zeigen (und wieder entfernen)
+    if removed > 0:
+        await fav_render_overview_in_place(update, context)
+        info = await q.message.reply_text(f"✅ Du hast {removed} Favorit{'en' if removed != 1 else ''} entfernt.")
+        await asyncio.sleep(2.0)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+        except Exception:
+            pass
+
+    # Ansonsten (Zurück ohne Auswahl): einfach wieder im Overview-State landen
+    return FAV_OVERVIEW
 
 
 
