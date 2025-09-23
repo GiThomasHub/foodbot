@@ -1727,9 +1727,10 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "fav_selection" in context.user_data:
             selected = context.user_data.pop("fav_selection")
             profile = profiles.get(user_id)
+            # Profil ist optional; ohne Profil = keine Einschränkung
             if not profile:
-                await update.message.reply_text("⚠️ Du hast noch kein Profil angelegt.")
-                return MENU_PROFILE
+                profile = None  # apply_profile_filters() kommt damit klar
+
 
             filters = context.user_data.get("filters", {})
             aufwand_wunsch = [1]*a1 + [2]*a2 + [3]*a3
@@ -3873,7 +3874,7 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # Abschiedsgruß → 2s → löschen → Banner → 1s → Übersicht
         try:
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.3)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
             context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
         except Exception:
@@ -4315,9 +4316,9 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     # Auswahl (falls vorhanden) speichern + kurze Info, die wir nach 1.2s wieder löschen
     if selected:
         context.user_data["fav_selection"] = selected
-        info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
+        info = await q.message.reply_text("✅ Auswahl gespeichert. Klicke nun auf <b>Zurück</b> und starte den normalen Suchlauf über <b>Menü</b>")
         try:
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.8)
         finally:
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
@@ -4379,7 +4380,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if removed > 0:
         await fav_render_overview_in_place(update, context)
         info = await q.message.reply_text(f"✅ Du hast {removed} Favorit{'en' if removed != 1 else ''} entfernt.")
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(1.5)
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
         except Exception:
