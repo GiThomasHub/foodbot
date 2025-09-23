@@ -4212,12 +4212,38 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = q.message
 
     if q.data == "fav_action_back":
+        chat_id = q.message.chat.id
+
+        # 1) Arbeits-UI (Listen/Keyboards der Unter-Loops) entfernen
+        for mid in context.user_data.get("fav_work_ids", []):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data["fav_work_ids"] = []
+
+        # 2) Die beiden Overview-Nachrichten (Liste + "Was möchtest Du machen?") zuverlässig entfernen
+        ids = context.user_data.get("fav_overview_ids") or {}
+        for key in ("list", "menu"):
+            mid = ids.get(key)
+            if mid:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+        context.user_data.pop("fav_overview_ids", None)
+
+        # 3) Fallback/Alt: evtl. noch in fav_msgs getrackte IDs auch säubern
         for mid in context.user_data.get("fav_msgs", []):
             try:
-                await context.bot.delete_message(chat_id=msg.chat.id, message_id=mid)
-            except:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
                 pass
+        context.user_data["fav_msgs"] = []
+
+        # 4) Conversation beenden
         return ConversationHandler.END
+
 
     if q.data == "fav_action_remove":
         favs = favorites.get(uid, [])
@@ -4268,6 +4294,8 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     q = update.callback_query
     await q.answer()
     uid = str(q.from_user.id)
+    chat_id = q.message.chat.id
+
     sel = sorted(context.user_data.get("fav_sel_sel", set()))
     idx_map: dict[int, str] = context.user_data.get("fav_sel_index_map", {}) or {}
 
@@ -4275,7 +4303,6 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     selected = [idx_map[i] for i in sel if i in idx_map]
 
     # Arbeitsnachrichten (Liste + Keyboard) wegräumen
-    chat_id = q.message.chat.id
     for mid in context.user_data.get("fav_work_ids", []):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -4285,15 +4312,20 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data.pop("fav_sel_sel", None)
     context.user_data.pop("fav_sel_index_map", None)
 
-    # Auswahl (falls vorhanden) speichern + kurze Info
+    # Auswahl (falls vorhanden) speichern + kurze Info, die wir nach 1.2s wieder löschen
     if selected:
         context.user_data["fav_selection"] = selected
-        msg_info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
-        await asyncio.sleep(1.2)
+        info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
+        try:
+            await asyncio.sleep(1.2)
+        finally:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+            except Exception:
+                pass
 
-    # WICHTIG: keine neue Übersicht senden, einfach zurück in den Overview-State
+    # Zurück in den Favoriten-Overview-State (keine neue Übersicht posten!)
     return FAV_OVERVIEW
-
 
 
 async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
