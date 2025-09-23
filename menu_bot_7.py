@@ -4102,7 +4102,7 @@ def _build_numbered_grouped_favs(uid: str) -> tuple[str, dict[int, str]]:
             running += 1
         lines.append("")  # Leerzeile zwischen Gruppen
 
-    text = "⭐ <u>Deine Favoriten (Auswahl):</u>\n" + "\n".join(lines).strip()
+    text = "⭐ <u><b>Deine Favoriten (Auswahl):</b></u>\n" + "\n".join(lines).strip()
     return text, idx_map
 
 
@@ -4121,7 +4121,6 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
                 pass
         return ConversationHandler.END
 
-    if q.data == "fav_action_remove":
     if q.data == "fav_action_remove":
         favs = favorites.get(uid, [])
         if not favs:
@@ -4144,12 +4143,11 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_DELETE_SELECT
 
-
     if q.data == "fav_action_select":
         favs = favorites.get(uid, [])
         if not favs:
             await msg.reply_text("Keine Favoriten vorhanden.")
-                return ConversationHandler.END
+            return ConversationHandler.END
 
         text, idx_map = _build_numbered_grouped_favs(uid)
         total = len(idx_map)
@@ -4173,101 +4171,28 @@ async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TY
     await q.answer()
     uid = str(q.from_user.id)
     sel = sorted(context.user_data.get("fav_sel_sel", set()))
-    favs = favorites.get(uid, [])
+    idx_map: dict[int, str] = context.user_data.get("fav_sel_index_map", {}) or {}
 
-    selected = []
-    for idx in sel:
-        if 1 <= idx <= len(favs):
-            selected.append(favs[idx - 1])
+    # Auswahl anhand der fortlaufenden Nummern auflösen
+    selected = [idx_map[i] for i in sel if i in idx_map]
 
-    if not selected:
-        # Nichts gewählt → wie „Zurück“: Arbeitsnachricht(en) weg, zurück zur Übersicht
-        chat_id = q.message.chat.id
-        for mid in context.user_data.get("fav_work_ids", []):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            except Exception:
-                pass
-        context.user_data["fav_work_ids"] = []
-
-        # Übersicht (Was möchtest Du machen?) bleibt stehen; im Loop bleiben
-        return FAV_OVERVIEW
-
-    context.user_data["fav_selection"] = selected
-
-    # (optional) kurzes Feedback
-    try:
-        msg_info = await q.message.reply_text("✅ Auswahl gespeichert. Starte nun den normalen Suchlauf über <b>Menü</b>")
-        await asyncio.sleep(1.2)
-        try:
-            await msg_info.delete()
-        except:
-            pass
-    except:
-        pass
-
-    # Auswahl gemerkt lassen
-    context.user_data["fav_selection"] = selected
-
+    # Arbeitsnachrichten (Liste + Keyboard) wegräumen
     chat_id = q.message.chat.id
-
-    # Arbeitsnachrichten wegräumen
     for mid in context.user_data.get("fav_work_ids", []):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
         except Exception:
             pass
     context.user_data["fav_work_ids"] = []
+    context.user_data.pop("fav_sel_sel", None)
+    context.user_data.pop("fav_sel_index_map", None)
 
-    # Übersicht in-place refreshen (auch wenn sich die Liste nicht geändert hat)
-    ids = context.user_data.get("fav_overview_ids")
-    if ids and "list" in ids and "menu" in ids:
-        # Liste (Text bleibt meist gleich, aber wir setzen sie explizit)
-        uid = str(q.from_user.id)
-        ensure_favorites_loaded(uid)
-        favs = favorites.get(uid, [])
-        txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=ids["list"],
-                text=pad_message(txt)
-            )
-        except BadRequest as e:
-            if "not modified" not in str(e):
-                raise
+    # Auswahl (falls vorhanden) speichern
+    if selected:
+        context.user_data["fav_selection"] = selected
 
-        # Aktionsmenü wieder aktiv halten
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
-            InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-            InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
-        ]])
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=ids["menu"],
-                text=(
-                    "<u>Was möchtest Du machen?</u>\n\n"
-                    "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
-                    "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-                    "🔙 <b>Zurück</b> zum Hauptmenü"
-                ),
-                reply_markup=kb
-            )
-        except BadRequest as e:
-            if "not modified" not in str(e):
-                raise
-
-        return FAV_OVERVIEW
-
-    # Fallback: neu zeichnen, falls keine IDs
-    m1 = await q.message.reply_text(pad_message(txt))
-    m2 = await q.message.reply_text("Was möchtest Du machen?...",
-                                    reply_markup=kb)
-    context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
-    return FAV_OVERVIEW
-
+    # Immer zurück zur initialen Übersicht (wie fav_start)
+    return await fav_start(update, context)
 
 
 async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4288,33 +4213,23 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(q.from_user.id)
     chat_id = q.message.chat.id
 
-    # Auswahl lesen
-    sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
+    # Auswahl lesen (fortlaufende Nummern)
+    sel = sorted(context.user_data.get("fav_del_sel", set()))
+    idx_map: dict[int, str] = context.user_data.get("fav_del_index_map", {}) or {}
 
     ensure_favorites_loaded(uid)
-    favs = favorites.get(uid, [])
-    removed = 0
-    for idx in sel:
-        if 1 <= idx <= len(favs):
-            favs.pop(idx - 1)
-            removed += 1
+    favs = favorites.get(uid, [])[:]
 
-    if removed > 0:
+    # Welche Gerichte sollen entfernt werden?
+    to_remove = {idx_map[i] for i in sel if i in idx_map}
+
+    if to_remove:
+        # Reihenfolge der übrigen Favoriten beibehalten
+        favs = [d for d in favs if d not in to_remove]
         favorites[uid] = favs
         store_set_favorites(user_key(int(uid)), favorites[uid])
 
-        # Kurzmeldung anzeigen, dann zusammen mit der Auswahl-Nachricht wieder entfernen
-        try:
-            info = await q.message.reply_text(f"✅ Du hast {removed} Favorit{'en' if removed != 1 else ''} entfernt.")
-            await asyncio.sleep(2.0)
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    # Auswahl-Nachrichten (Liste + Buttons) wegräumen, egal ob etwas entfernt wurde oder nicht
+    # Arbeitsnachrichten (Liste + Keyboard) entfernen
     for mid in context.user_data.get("fav_work_ids", []):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -4322,84 +4237,10 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     context.user_data["fav_work_ids"] = []
     context.user_data.pop("fav_del_sel", None)
+    context.user_data.pop("fav_del_index_map", None)
 
-
-    # 2) Übersicht in-place updaten (anstatt neue Nachrichten zu schicken)
-    ids = context.user_data.get("fav_overview_ids")
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + "\n".join(f"‣ {escape(d)}" for d in favs) if favs else "Keine Favoriten vorhanden."
-
-    if ids and "list" in ids and "menu" in ids:
-        # Liste editieren
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=ids["list"],
-                text=pad_message(txt)
-            )
-        except BadRequest as e:
-            if "not modified" not in str(e):
-                raise
-
-        # Aktionsmenü-Text/Keyboard unverändert erneut setzen
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
-            InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-            InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
-        ]])
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=ids["menu"],
-                text=(
-                    "<u>Was möchtest Du machen?</u>\n\n"
-                    "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
-                    "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-                    "🔙 <b>Zurück</b> zum Hauptmenü"
-                ),
-                reply_markup=kb
-            )
-        except BadRequest as e:
-            if "not modified" not in str(e):
-                raise
-
-        # Im Favoriten-Loop bleiben
-        return FAV_OVERVIEW
-
-    # 3) Fallback: Falls Übersicht-IDs fehlen, neu zeichnen und merken
-    m1 = await q.message.reply_text(pad_message(txt))
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
-        InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
-    ]])
-    m2 = await q.message.reply_text(
-        "<u>Was möchtest Du machen?</u>\n\n"
-        "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
-        "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-        "🔙 <b>Zurück</b> zum Hauptmenü",
-        reply_markup=kb
-    )
-    context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
-    return FAV_OVERVIEW
-
-
-    # Fallback: falls keine IDs vorhanden, Übersicht neu erstellen und merken
-    m1 = await q.message.reply_text(pad_message(txt))
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
-        InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("🔙 Zurück",    callback_data="fav_action_back"),
-    ]])
-    m2 = await q.message.reply_text(
-        "<u>Was möchtest Du machen?</u>\n\n"
-        "✔️ <b>Selektiere</b> Favoriten für Gerichteauswahl\n\n"
-        "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-        "🔙 <b>Zurück</b> zum Hauptmenü",
-        reply_markup=kb
-    )
-    context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
-    return FAV_OVERVIEW
-
+    # Immer zurück zur initialen Übersicht (wie fav_start)
+    return await fav_start(update, context)
 
 
 
