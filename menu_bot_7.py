@@ -379,15 +379,15 @@ def save_json(filename, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 def build_swap_keyboard(menus: list[str], selected: set[int]) -> InlineKeyboardMarkup:
-    """Buttons 1…N mit Toggle-Häkchen + ‘Fertig’."""
+    """Buttons 1…N mit Toggle-Häkchen + dynamischem Footer ('(kein tausch)'/ 'Weiter')."""
     btns = []
     for idx, _g in enumerate(menus, 1):
         label = f"{'✅ ' if idx in selected else ''}{idx}"
         btns.append(InlineKeyboardButton(label, callback_data=f"swap_sel:{idx}"))
     rows = distribute_buttons_equally(btns, max_per_row=7)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="swap_done")])
+    footer_label = "Weiter" if selected else "(kein Tausch)"
+    rows.append([InlineKeyboardButton(footer_label, callback_data="swap_done")])
     return InlineKeyboardMarkup(rows)
-
 
 
 def format_dish_with_sides(dish: str, sides: list[str]) -> str:
@@ -859,7 +859,7 @@ def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based:
         label = ("✅ " if (i - 1) in selected_zero_based else "") + label_base
         rows.append([InlineKeyboardButton(label, callback_data=f"select_{i}")])
 
-    footer_label = "✔️ Fertig" if selected_zero_based else "(selektiere oben)"
+    footer_label = "✔️ Fertig" if selected_zero_based else "keine Beilagen"
     rows.append([InlineKeyboardButton(footer_label, callback_data="select_done")])
     return InlineKeyboardMarkup(rows)
 
@@ -1849,6 +1849,8 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             combined = pad_message(f"{header}\n{lines}")
             msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
             context.user_data["flow_msgs"].append(msg.message_id)
+            context.user_data["proposal_msg_id"] = msg.message_id
+
 
             return ASK_CONFIRM
 
@@ -1999,7 +2001,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         combined = pad_message(f"{header}\n{lines}")
         msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
         context.user_data["flow_msgs"].append(msg.message_id)
-
+        context.user_data["proposal_msg_id"] = msg.message_id
 
         return ASK_CONFIRM
 
@@ -2361,58 +2363,62 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(query.from_user.id)
 
     if query.data == "ask_no":
-        await mark_yes_no(query, False, "ask_yes", "ask_no")
-
-        # Flow-UI löschen (Session behalten)
-        await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+        # Beilagen-Frage sofort entfernen
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat.id,
+                message_id=query.message.message_id
+            )
+        except Exception:
+            pass
 
         count = len(sessions[uid]["menues"])
         text  = dishes_header(count, step=2) + "\n"
         for dish in sessions[uid]["menues"]:
             sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
             side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
-            text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+            text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n"
         msg = await query.message.reply_text(pad_message(text))
-        context.user_data["flow_msgs"].append(msg.message_id)
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
 
         return await ask_for_persons(update, context)
 
+
     if query.data == "ask_yes":
-        await mark_yes_no(query, True, "ask_yes", "ask_no")
+        # Beilagen-Frage sofort entfernen
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat.id,
+                message_id=query.message.message_id
+            )
+        except Exception:
+            pass
 
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
-        # --- NEU: 0 Gerichte mit Beilagen → Loop komplett überspringen ---
         if len(side_menus) == 0:
-            await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
             count = len(sessions[uid]["menues"])
             text  = dishes_header(count, step=3) + "\n"
             for dish in menus:
                 sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
-                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n"
             msg = await query.message.reply_text(pad_message(text))
-            context.user_data["flow_msgs"].append(msg.message_id)
+            context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
             return await ask_for_persons(update, context)
 
-        # 1 Gericht → direkt in die Beilagenselektion
         if len(side_menus) == 1:
             context.user_data["menu_list"] = menus
-            context.user_data["to_process"] = side_menus              # 0-basierte Indizes
+            context.user_data["to_process"] = side_menus
             context.user_data["menu_idx"]   = 0
             return await ask_beilagen_for_menu(query, context)
 
-        # >1 Gerichte → zuerst fragen, für welche (Namensbuttons, Mehrfachauswahl)
         context.user_data["menu_list"] = menus
         context.user_data["selected_menus"] = set()  # 0-basierte Indizes
-
         kb = build_menu_select_keyboard_for_sides(menus, context.user_data["selected_menus"], max_len=35)
-        msg = await query.message.reply_text(
-            pad_message("Für welche Gerichte?"),
-            reply_markup=kb
-        )
-        context.user_data["flow_msgs"].append(msg.message_id)
+        msg = await query.message.reply_text(pad_message("Für welche Gerichte?"), reply_markup=kb)
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return SELECT_MENUES
 
 
@@ -2979,14 +2985,22 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Noch nicht vollständig verteilt!", show_alert=True)
             return MENU_AUFWAND
 
-        # Werte übernehmen und weiterreichen als Text wie bisher
-        context.user_data["flow_msgs"].append(query.message.message_id)
         a1 = verteilung["light"]
         a2 = verteilung["medium"]
         a3 = verteilung["heavy"]
-        total = a1 + a2 + a3  # sichere Gesamtmenge, basierend auf den realen Klicks
+        total = a1 + a2 + a3  # sichere Gesamtmenge
+
+        # Aufwands-Nachricht sofort entfernen
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat.id,
+                message_id=query.message.message_id
+            )
+        except Exception:
+            pass
 
         return await menu_input_direct(f"{total} ({a1},{a2},{a3})", update, context)
+
 
 
     elif data == "noop":
@@ -3026,13 +3040,44 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return TAUSCHE_SELECT
 
-    # 2) 'Fertig' ohne Auswahl → Warnung
+    # 2) '(kein tausch)' → verhalte dich wie 'Passt' am Vorschlag
     if data == "swap_done" and not sel:
-        await q.answer("Nichts ausgewählt.", show_alert=True)
-        return TAUSCHE_SELECT
+        # Tausch-Frage entfernen
+        try:
+            await context.bot.delete_message(
+                chat_id=q.message.chat.id,
+                message_id=q.message.message_id
+            )
+        except Exception:
+            pass
 
-    # 3) 'Fertig' mit Auswahl → weiter in Schritt 4
+        # Buttons am letzten Vorschlag entfernen (Text bleibt stehen)
+        pid = context.user_data.get("proposal_msg_id")
+        if isinstance(pid, int):
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=q.message.chat.id,
+                    message_id=pid,
+                    reply_markup=None
+                )
+            except Exception:
+                pass
 
+        # Weiter wie 'Passt' → Beilagenfrage oder direkt Personen
+        menus = sessions[uid]["menues"]
+        side_menus = [i for i, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+        if not side_menus:
+            return await ask_for_persons(update, context)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ja", callback_data="ask_yes"),
+             InlineKeyboardButton("Nein", callback_data="ask_no")]
+        ])
+        msg2 = await q.message.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
+        context.user_data.setdefault("flow_msgs", []).append(msg2.message_id)
+        return ASK_BEILAGEN
+
+    # 3) 'Weiter' mit Auswahl → alten Vorschlag + Tauschfrage löschen, neuen Vorschlag senden
     if data == "swap_done":
         # 1) Profil-hard filter + Basis-DataFrame
         profile  = profiles.get(uid)
@@ -3041,13 +3086,10 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions[uid].setdefault("beilagen", {})
         menues   = sessions[uid]["menues"]
         aufw     = sessions[uid]["aufwand"]
-        # Globaler Swap-History per Aufwand-Stufe initialisieren
         swap_history = sessions[uid].setdefault("swap_history", {1: [], 2: [], 3: []})
-        # Beim ersten Mal: die initialen Menüs eintragen
         if all(len(v) == 0 for v in swap_history.values()):
             for dish, lvl in zip(menues, aufw):
                 swap_history[lvl].append(dish)
-
 
         swapped_slots: list[int] = []
         for idx in sorted(sel):
@@ -3057,15 +3099,11 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row_cur       = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
             current_art   = ART_ORDER.get(row_cur["Typ"], 2)
 
-            # a) Andere Slots ausschließen
             other_sel = set(menues) - {current_dish}
-
-            # b) Kandidaten auf diese Aufwand-Stufe einschränken
             cands = set(
                 basis_df[basis_df["Aufwand"] == current_aufw]["Gericht"]
             ) - {current_dish} - other_sel
 
-            # c) Aufwand-Fallback
             if not cands:
                 for lvl in (current_aufw - 1, current_aufw + 1):
                     if 1 <= lvl <= 3:
@@ -3076,20 +3114,17 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             cands = fb
                             break
 
-            # d) No-Repeat global per Stufe
             used = set(swap_history[current_aufw])
             pool = list(cands - used)
             if not pool:
                 swap_history[current_aufw] = [
-                    m for m, lvl in zip(menues, aufw) if lvl == current_aufw
+                    m for m, lv in zip(menues, aufw) if lv == current_aufw
                 ]
                 used = set(swap_history[current_aufw])
                 pool = list(cands - used)
             if not pool:
                 continue
 
-
-            # e) Scoring nach Aufwand & Art
             scored = []
             for cand in pool:
                 row_c    = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
@@ -3102,8 +3137,6 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             min_score = min(score for _, score in scored)
             best      = [c for c, score in scored if score == min_score]
 
-            # f) Tausche & History updaten
-            # Aktiv-/Gewicht-Bias in Tie-Break
             def _aktiv_weight(name: str) -> float:
                 row = df_gerichte[df_gerichte["Gericht"] == name].iloc[0]
                 if "Gewicht" in row.index:
@@ -3122,12 +3155,20 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sessions[uid]["beilagen"].pop(current_dish, None)
             swapped_slots.append(idx)
 
-
-
-
-        # Änderungen speichern
         persist_session(update)
         context.user_data["swapped_indices"] = swapped_slots
+
+        # Vor neuem Vorschlag: altes 'Mein/Neuer Vorschlag' + Tauschfrage entfernen
+        pid = context.user_data.get("proposal_msg_id")
+        if isinstance(pid, int):
+            try:
+                await context.bot.delete_message(chat_id=q.message.chat.id, message_id=pid)
+            except Exception:
+                pass
+        try:
+            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=q.message.message_id)
+        except Exception:
+            pass
 
         if show_debug_for(update):
             gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(sessions[uid]["menues"])]
@@ -3148,21 +3189,19 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             msg_debug = await q.message.reply_text(debug_msg)
             context.user_data["flow_msgs"].append(msg_debug.message_id)
-
-
-
-        # 3) Neue Liste als eigene Nachricht senden + tracken
+        # Neuen Vorschlag posten
         header = "🥣 <u>Neuer Vorschlag:</u>"
         menutext = "\n".join(f"{i}. {g}" for i, g in enumerate(menues, 1))
         confirm_kb = InlineKeyboardMarkup([[ 
             InlineKeyboardButton("Passt",   callback_data="swap_ok"),
             InlineKeyboardButton("Ändern",  callback_data="swap_again"),
         ]])
-        msg = await q.message.reply_text(pad_message(f"{header}\n{menutext}"), reply_markup=confirm_kb)
-        context.user_data["flow_msgs"].append(msg.message_id)
-
+        msg_new = await q.message.reply_text(pad_message(f"{header}\n{menutext}"), reply_markup=confirm_kb)
+        context.user_data.setdefault("flow_msgs", []).append(msg_new.message_id)
+        context.user_data["proposal_msg_id"] = msg_new.message_id
 
         return TAUSCHE_CONFIRM
+
 
 
 
@@ -4742,7 +4781,10 @@ def main():
             ASK_CONFIRM:   [CallbackQueryHandler(menu_confirm_cb, pattern="^confirm_")],
             ASK_BEILAGEN:  [CallbackQueryHandler(ask_beilagen_cb)],
             SELECT_MENUES:   [CallbackQueryHandler(select_menus_cb)],
-            BEILAGEN_SELECT: [CallbackQueryHandler(beilage_select_cb)],
+            BEILAGEN_SELECT: [
+                CallbackQueryHandler(restart_start,           pattern="^restart$"),
+                CallbackQueryHandler(beilage_select_cb,       pattern=r"^beilage_(\d+|done)$"),
+            ],
             ASK_FINAL_LIST:  [CallbackQueryHandler(ask_final_list_cb)],
             ASK_SHOW_LIST:   [CallbackQueryHandler(ask_showlist_cb)],
             PERSONS_SELECTION: [
