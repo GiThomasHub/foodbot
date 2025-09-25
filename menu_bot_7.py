@@ -2078,9 +2078,19 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
 
 
-        # 4a) 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
+            # 1) Vorschlagskarte gezielt entfernen
+            pid = context.user_data.pop("proposal_msg_id", None)
+            if isinstance(pid, int):
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+                except Exception:
+                    pass
+
+            # 2) Debug-/Flow-Messages wegräumen
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+
+            # 3) Zusammenfassung + Personen
             text = "🥣 <u>Deine Auswahl:</u>\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
@@ -2089,6 +2099,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
+
 
         # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
         kb = InlineKeyboardMarkup([[
@@ -2361,15 +2372,26 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(query.from_user.id)
 
     if query.data == "ask_no":
-        # Beilagen-Frage sofort entfernen
+        chat_id = query.message.chat.id
+
+        # a) Beilagen-Frage sofort entfernen
         try:
-            await context.bot.delete_message(
-                chat_id=query.message.chat.id,
-                message_id=query.message.message_id
-            )
+            await context.bot.delete_message(chat_id=chat_id, message_id=query.message.message_id)
         except Exception:
             pass
 
+        # b) Vorschlagskarte entfernen
+        pid = context.user_data.pop("proposal_msg_id", None)
+        if isinstance(pid, int):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+            except Exception:
+                pass
+
+        # c) Debug-/Flow-Messages wegräumen
+        await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+
+        # d) Zusammenfassung + Personen
         count = len(sessions[uid]["menues"])
         text  = dishes_header(count, step=2) + "\n"
         for dish in sessions[uid]["menues"]:
@@ -2380,6 +2402,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
 
         return await ask_for_persons(update, context)
+
 
 
     if query.data == "ask_yes":
@@ -2396,6 +2419,20 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
         if len(side_menus) == 0:
+            chat_id = query.message.chat.id
+
+            # a) Vorschlagskarte entfernen
+            pid = context.user_data.pop("proposal_msg_id", None)
+            if isinstance(pid, int):
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+                except Exception:
+                    pass
+
+            # b) Debug-/Flow-Messages wegräumen
+            await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+
+            # c) Zusammenfassung + Personen
             count = len(sessions[uid]["menues"])
             text  = dishes_header(count, step=3) + "\n"
             for dish in menus:
@@ -2405,6 +2442,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = await query.message.reply_text(pad_message(text))
             context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
             return await ask_for_persons(update, context)
+
 
         if len(side_menus) == 1:
             context.user_data["menu_list"] = menus
@@ -2505,18 +2543,31 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "select_done":
         if not sel:
-            # Beilagenloop überspringen → direkt Personen
+            chat_id = query.message.chat.id
+
+            # a) Vorschlagskarte entfernen
+            pid = context.user_data.pop("proposal_msg_id", None)
+            if isinstance(pid, int):
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+                except Exception:
+                    pass
+
+            # b) Debug-/Flow-Messages wegräumen
             await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+
+            # c) Zusammenfassung + Personen
             uid = str(query.from_user.id)
             count = len(sessions[uid]["menues"])
             text  = dishes_header(count, step=5) + "\n"
             for dish in sessions[uid]["menues"]:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n"
             msg = await query.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
+
 
         context.user_data["to_process"] = sorted(sel)  # 0-basierte Indizes
         context.user_data["menu_idx"]   = 0
@@ -2574,19 +2625,32 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.user_data["menu_idx"] < len(idx_list):
             return await ask_beilagen_for_menu(query, context)
 
-        # Abschluss: Flow-UI löschen (Session behalten)
+        # Abschluss: Vorschlagskarte + Debug/Flow aufräumen (Session behalten)
+        chat_id = query.message.chat.id
+
+        # a) Vorschlagskarte entfernen
+        pid = context.user_data.pop("proposal_msg_id", None)
+        if isinstance(pid, int):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+            except Exception:
+                pass
+
+        # b) Debug-/Flow-Messages wegräumen
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
+        # c) Zusammenfassung + Personen
         count = len(sessions[uid]["menues"])
         text  = dishes_header(count, step=1) + "\n"
         for dish in sessions[uid]["menues"]:
             nums = sessions[uid].get("beilagen", {}).get(dish, [])
             side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-            text += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+            text += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n"
         msg = await query.message.reply_text(pad_message(text))
         context.user_data["flow_msgs"].append(msg.message_id)
 
         return await ask_for_persons(update, context)
+
 
     # Toggle einer Beilage
     num = int(data.split("_")[1])
@@ -3038,7 +3102,6 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return TAUSCHE_SELECT
 
-    # 2) '(kein tausch)' → verhalte dich wie 'Passt' am Vorschlag
     if data == "swap_done" and not sel:
         # Tausch-Frage entfernen
         try:
@@ -3049,13 +3112,13 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        # Buttons am letzten Vorschlag entfernen (Text bleibt stehen)
-        pid = context.user_data.get("proposal_msg_id")
-        if isinstance(pid, int):
+        # Buttons am letzten Vorschlag entfernen (Text bleibt bis ggf. gelöscht)
+        pid_preview = context.user_data.get("proposal_msg_id")
+        if isinstance(pid_preview, int):
             try:
                 await context.bot.edit_message_reply_markup(
                     chat_id=q.message.chat.id,
-                    message_id=pid,
+                    message_id=pid_preview,
                     reply_markup=None
                 )
             except Exception:
@@ -3064,7 +3127,28 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Weiter wie 'Passt' → Beilagenfrage oder direkt Personen
         menus = sessions[uid]["menues"]
         side_menus = [i for i, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+
         if not side_menus:
+            # a) Vorschlagskarte komplett entfernen
+            pid = context.user_data.pop("proposal_msg_id", None)
+            if isinstance(pid, int):
+                try:
+                    await context.bot.delete_message(chat_id=q.message.chat.id, message_id=pid)
+                except Exception:
+                    pass
+
+            # b) Debug-/Flow-Messages wegräumen
+            await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
+
+            # c) Zusammenfassung + Personen
+            count = len(sessions[uid]["menues"])
+            text  = dishes_header(count, step=2) + "\n"
+            for dish in menus:
+                nums       = sessions[uid].get("beilagen", {}).get(dish, [])
+                side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n"
+            msg2 = await q.message.reply_text(pad_message(text))
+            context.user_data.setdefault("flow_msgs", []).append(msg2.message_id)
             return await ask_for_persons(update, context)
 
         kb = InlineKeyboardMarkup([
@@ -3074,6 +3158,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg2 = await q.message.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
         context.user_data.setdefault("flow_msgs", []).append(msg2.message_id)
         return ASK_BEILAGEN
+
 
     # 3) 'Weiter' mit Auswahl → alten Vorschlag + Tauschfrage löschen, neuen Vorschlag senden
     if data == "swap_done":
@@ -3277,6 +3362,15 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
         if not side_menus:
+            # a) Vorschlagskarte entfernen
+            pid = context.user_data.pop("proposal_msg_id", None)
+            if isinstance(pid, int):
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+                except Exception:
+                    pass
+
+            # (bestehendes Löschen der flow_msgs bleibt wie im Code)
             for mid in context.user_data.get("flow_msgs", []):
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -3284,15 +3378,17 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     pass
             context.user_data["flow_msgs"].clear()
 
+            # b) Zusammenfassung + Personen (bestehender Code)
             count = len(sessions[uid]["menues"])
             text  = dishes_header(count, step=2) + "\n"
             for dish in menus:
                 nums       = sessions[uid].get("beilagen", {}).get(dish, [])
                 side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n" #f"‣ {escape(format_dish_with_sides(dish, side_names))}\n"
+                text      += format_hanging_line(escape(format_dish_with_sides(dish, side_names)), bullet="‣", indent_nbsp=2, wrap_at=60) + "\n"
             msg = await q.message.reply_text(pad_message(text))
             context.user_data["flow_msgs"].append(msg.message_id)
             return await ask_for_persons(update, context)
+
 
         # >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
         kb = InlineKeyboardMarkup([[
