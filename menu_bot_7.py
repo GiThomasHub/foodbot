@@ -1848,7 +1848,6 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
             combined = pad_message(f"{header}\n{lines}")
             msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
-            context.user_data["flow_msgs"].append(msg.message_id)
             context.user_data["proposal_msg_id"] = msg.message_id
 
 
@@ -2000,7 +1999,6 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         combined = pad_message(f"{header}\n{lines}")
         msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
-        context.user_data["flow_msgs"].append(msg.message_id)
         context.user_data["proposal_msg_id"] = msg.message_id
 
         return ASK_CONFIRM
@@ -3170,25 +3168,26 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        if show_debug_for(update):
-            gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(sessions[uid]["menues"])]
-            aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
-            aufwand_text    = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
-            kitchen_counter    = Counter(gewaehlte_gerichte["Küche"])
-            kitchen_text       = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
-            typ_counter     = Counter(gewaehlte_gerichte["Typ"])
-            typ_text        = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
-            einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
-            einschr_text    = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
+        #if show_debug_for(update):
+        #    gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(sessions[uid]["menues"])]
+        #    aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
+        #    aufwand_text    = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
+        #    kitchen_counter    = Counter(gewaehlte_gerichte["Küche"])
+        #    kitchen_text       = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
+        #    typ_counter     = Counter(gewaehlte_gerichte["Typ"])
+        #    typ_text        = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
+        #    einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
+        #    einschr_text    = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
 
-            debug_msg = (
-                f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-                f"\n🎨 Küche-Verteilung:    {kitchen_text}"
-                f"\n⚙️ Typ-Verteilung:      {typ_text}"
-                f"\n🥗 Ernährungsstil:       {einschr_text}"
-            )
-            msg_debug = await q.message.reply_text(debug_msg)
-            context.user_data["flow_msgs"].append(msg_debug.message_id)
+        #    debug_msg = (
+        #        f"\n📊 Aufwand-Verteilung: {aufwand_text}"
+        #        f"\n🎨 Küche-Verteilung:    {kitchen_text}"
+        #        f"\n⚙️ Typ-Verteilung:      {typ_text}"
+        #        f"\n🥗 Ernährungsstil:       {einschr_text}"
+        #    )
+        #    msg_debug = await q.message.reply_text(debug_msg)
+        #    context.user_data["flow_msgs"].append(msg_debug.message_id)
+            
         # Neuen Vorschlag posten
         header = "🥣 <u>Neuer Vorschlag:</u>"
         menutext = "\n".join(f"{i}. {g}" for i, g in enumerate(menues, 1))
@@ -3197,7 +3196,6 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Ändern",  callback_data="swap_again"),
         ]])
         msg_new = await q.message.reply_text(pad_message(f"{header}\n{menutext}"), reply_markup=confirm_kb)
-        context.user_data.setdefault("flow_msgs", []).append(msg_new.message_id)
         context.user_data["proposal_msg_id"] = msg_new.message_id
 
         return TAUSCHE_CONFIRM
@@ -3470,6 +3468,14 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
+
+    # Vorschlagskarte ("Mein Vorschlag" / "Neuer Vorschlag") gezielt entfernen
+    pid = context.user_data.pop("proposal_msg_id", None)
+    if isinstance(pid, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+        except Exception:
+            pass
 
 
     # ---- Flow-UI aufräumen (nur flow_msgs) ----
