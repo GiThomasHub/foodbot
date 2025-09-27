@@ -637,6 +637,77 @@ def build_new_run_banner() -> str:
 
 # ===== Zentraler Flow-Reset & Mini-Helper =====
 
+def track_msg(context: ContextTypes.DEFAULT_TYPE, key: str, mid: int) -> None:
+    if isinstance(mid, int):
+        context.user_data.setdefault(key, []).append(mid)
+
+async def delete_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    pid = context.user_data.pop("proposal_msg_id", None)
+    if isinstance(pid, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+        except Exception:
+            pass
+
+async def send_proposal_card(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    title: str,
+    dishes: list[str] | None = None,
+    *,
+    buttons: list[list[InlineKeyboardButton]] | None = None,
+    replace_old: bool = True,
+) -> int:
+    uid = str(update.effective_user.id)
+    chat_id = update.effective_chat.id
+    if replace_old:
+        await delete_proposal_card(context, chat_id)
+
+    if dishes is None:
+        dishes = sessions.get(uid, {}).get("menues", [])
+
+    header = f"🥣 <u><b>{title}</b></u>"
+    body   = "\n".join(f"{i+1}. {g}" for i, g in enumerate(dishes))
+    kb     = InlineKeyboardMarkup(buttons) if buttons else None
+
+    msg = await context.bot.send_message(chat_id, pad_message(f"{header}\n{body}"), reply_markup=kb)
+    context.user_data["proposal_msg_id"] = msg.message_id
+    return msg.message_id
+
+async def ask_beilagen_yes_no(anchor_msg, context: ContextTypes.DEFAULT_TYPE) -> int:
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ja", callback_data="ask_yes"),
+         InlineKeyboardButton("Nein", callback_data="ask_no")]
+    ])
+    m = await anchor_msg.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
+    track_msg(context, "flow_msgs", m.message_id)
+    return ASK_BEILAGEN
+
+def build_beilage_keyboard(allowed_codes: set[int], selected: list[int]) -> InlineKeyboardMarkup:
+    dfb = df_beilagen.copy()
+    dfb["Nummer"] = dfb["Nummer"].astype(int)
+    btns = []
+    for _, r in dfb[dfb["Nummer"].isin(allowed_codes)].iterrows():
+        code = int(r["Nummer"])
+        name = str(r["Beilagen"])
+        label = f"{'✅ ' if code in selected else ''}{name}"
+        btns.append(InlineKeyboardButton(label, callback_data=f"beilage_{code}"))
+    rows = distribute_buttons_equally(btns, max_per_row=3)
+    footer = InlineKeyboardButton("Fertig" if selected else "Weiter ohne Beilage", callback_data="beilage_done")
+    rows.append([footer])
+    return InlineKeyboardMarkup(rows)
+
+EFFORT_LABELS = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+def effort_label(lvl: int | None) -> str:
+    return EFFORT_LABELS.get(lvl or 0, "")
+
+def normalize_link(v: str) -> str:
+    v = (v or "").strip()
+    if not v:
+        return ""
+    return v if v.startswith(("http://","https://")) else "https://" + v
+
+
 async def delete_last_flow_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, list_key: str = "flow_msgs") -> None:
     """
     Löscht nur die letzte getrackte Flow-Nachricht aus context.user_data[list_key].
@@ -1896,17 +1967,15 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-            header = "🥣 <u><b>Vorschlag:</b></u>"
-            lines = "\n".join(f"{i+1}. {g}" for i, g in enumerate(final_gerichte))
-            confirm_kb = InlineKeyboardMarkup([[  
-                InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
-                InlineKeyboardButton("Ändern",  callback_data="confirm_no"),
-            ]])
-            combined = pad_message(f"{header}\n{lines}")
-            msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
-            context.user_data["proposal_msg_id"] = msg.message_id
-
-
+            await send_proposal_card(
+                update, context,
+                title="Vorschlag:",
+                dishes=final_gerichte,
+                buttons=[
+                    [InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
+                     InlineKeyboardButton("Ändern",  callback_data="confirm_no")]
+                ]
+            )
             return ASK_CONFIRM
 
 
@@ -2044,17 +2113,17 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["flow_msgs"].append(msg_debug.message_id)
 
 
-        header = "🥣 <u><b>Vorschlag:</b></u>"
-        lines = "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
-        confirm_kb = InlineKeyboardMarkup([[  
-            InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
-            InlineKeyboardButton("Ändern",  callback_data="confirm_no"),
-        ]])
-        combined = pad_message(f"{header}\n{lines}")
-        msg = await update.message.reply_text(combined, reply_markup=confirm_kb)
-        context.user_data["proposal_msg_id"] = msg.message_id
-
+        await send_proposal_card(
+            update, context,
+            title="Vorschlag:",
+            dishes=ausgewaehlt,
+            buttons=[
+                [InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
+                 InlineKeyboardButton("Ändern",  callback_data="confirm_no")]
+            ]
+        )
         return ASK_CONFIRM
+
 
 
 
@@ -2134,16 +2203,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return await show_final_dishes_and_ask_persons(update, context, step=2)
 
         # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="ask_yes"),
-            InlineKeyboardButton("Nein", callback_data="ask_no"),
-        ]])
-        msg = await query.message.reply_text(
-            pad_message("Möchtest Du Beilagen hinzufügen?"),
-            reply_markup=kb
-        )
-        context.user_data["flow_msgs"].append(msg.message_id)
-        return ASK_BEILAGEN
+        return await ask_beilagen_yes_no(query.message, context)
 
 
     if query.data == "confirm_no":
@@ -2154,7 +2214,6 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-
 
         # Tausche-Loop starten
         context.user_data["swap_candidates"] = set()
@@ -2293,10 +2352,9 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         lvl = get_aufwand_for(dish)
 
-    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-    label_txt  = _label_map.get(lvl)
-
+    label_txt = effort_label(lvl)
     aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
+
 
     # 4) Vorschlag + Buttons (in *derselben* Nachricht)
     text = pad_message(f"🥣 <u><b>Vorschlag:</b></u>\n\n{escape(dish)} {aufwand_label}")
@@ -2305,7 +2363,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🔁 Neu",   callback_data="quickone_neu"),
     ]])
     msg = await context.bot.send_message(chat_id, text=text, reply_markup=markup)
-    context.user_data["flow_msgs"].append(msg.message_id)
+    context.user_data["proposal_msg_id"] = msg.message_id  # gezielt als Vorschlagskarte tracken
 
     return QUICKONE_CONFIRM
 
@@ -2332,7 +2390,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Keine Beilagen möglich → direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
         if not allowed:
-            return await ask_for_persons(update, context)
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
 
         # Beilagen möglich → separate Beilagen-Frage senden (Vorschlag bleibt sichtbar)
         kb = InlineKeyboardMarkup([[
@@ -2368,7 +2426,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pass
 
         # Direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
-        return await ask_for_persons(update, context)
+        return await show_final_dishes_and_ask_persons(update, context, step=2)
 
 
     if data == "quickone_ask_yes":
@@ -2486,29 +2544,12 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
     sel = sessions.setdefault(uid, {}).setdefault("beilagen", {}).setdefault(gericht, [])
 
     # 4) Inline-Buttons bauen (max. 3/Zeile)
-    side_buttons = []
-    dfb = df_beilagen.copy()
-    dfb["Nummer"] = dfb["Nummer"].astype(int)  # falls dtype driftet
-    for _, r in dfb[dfb["Nummer"].isin(erlaubt)].iterrows():
-        side_buttons.append(
-            InlineKeyboardButton(
-                str(r["Beilagen"]),
-                callback_data=f"beilage_{int(r['Nummer'])}"
-            )
-        )
-
-    # Footer-Label abhängig davon, ob bereits Beilagen selektiert sind
-    footer_label = "Fertig" if sel else "Weiter ohne Beilage"
-
-    rows = distribute_buttons_equally(side_buttons, max_per_row=3)
-    rows.append([InlineKeyboardButton(footer_label, callback_data="beilage_done")])
-
-    # 5) Nachricht senden + tracken
+    markup = build_beilage_keyboard(erlaubt, sel)
     msg = await update_or_query.message.reply_text(
         pad_message(f"Wähle Beilagen für: <b>{escape(gericht)}</b>"),
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=markup,
     )
-    context.user_data["flow_msgs"].append(msg.message_id)
+    track_msg(context, "flow_msgs", msg.message_id)
 
 
     return BEILAGEN_SELECT
@@ -2600,20 +2641,8 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sel.append(num)
 
     # Buttons neu zeichnen
-    side_buttons = []
-    for code in context.user_data.get("allowed_beilage_codes", []):
-        name = df_beilagen.loc[df_beilagen["Nummer"] == code, "Beilagen"].iloc[0]
-        mark = " ✅" if code in sel else ""
-        side_buttons.append(
-            InlineKeyboardButton(f"{mark}{name}", callback_data=f"beilage_{code}")
-        )
-
-    # Footer-Label dynamisch (keine Auswahl → "Weiter ohne Beilage")
-    footer_label = "Fertig" if sel else "Weiter ohne Beilage"
-
-    rows = distribute_buttons_equally(side_buttons, max_per_row=3)
-    rows.append([InlineKeyboardButton(footer_label, callback_data="beilage_done")])
-    await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
+    markup = build_beilage_keyboard(set(context.user_data.get("allowed_beilage_codes", [])), sel)
+    await query.message.edit_reply_markup(markup)
     
     return BEILAGEN_SELECT
 
@@ -3182,15 +3211,15 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         #    context.user_data["flow_msgs"].append(msg_debug.message_id)
             
         # Neuen Vorschlag posten
-        header = "🥣 <u>Neuer Vorschlag:</u>"
-        menutext = "\n".join(f"{i}. {g}" for i, g in enumerate(menues, 1))
-        confirm_kb = InlineKeyboardMarkup([[ 
-            InlineKeyboardButton("Passt",   callback_data="swap_ok"),
-            InlineKeyboardButton("Ändern",  callback_data="swap_again"),
-        ]])
-        msg_new = await q.message.reply_text(pad_message(f"{header}\n{menutext}"), reply_markup=confirm_kb)
-        context.user_data["proposal_msg_id"] = msg_new.message_id
-
+        await send_proposal_card(
+            update, context,
+            title="Neuer Vorschlag:",
+            dishes=menues,
+            buttons=[
+                [InlineKeyboardButton("Passt",  callback_data="swap_ok"),
+                 InlineKeyboardButton("Ändern", callback_data="swap_again")]
+            ]
+        )
         return TAUSCHE_CONFIRM
 
 
@@ -3275,16 +3304,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
         # >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="ask_yes"),
-            InlineKeyboardButton("Nein", callback_data="ask_no"),
-        ]])
-        msg = await q.message.reply_text(
-            pad_message("Möchtest Du Beilagen hinzufügen?"),
-            reply_markup=kb
-        )
-        context.user_data["flow_msgs"].append(msg.message_id)
-        return ASK_BEILAGEN
+        return await ask_beilagen_yes_no(q.message, context)
 
 
 
@@ -3450,12 +3470,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
 
     # Vorschlagskarte ("Mein Vorschlag" / "Neuer Vorschlag") gezielt entfernen
-    pid = context.user_data.pop("proposal_msg_id", None)
-    if isinstance(pid, int):
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=pid)
-        except Exception:
-            pass
+    await delete_proposal_card(context, chat_id)
 
 
     # ---- Flow-UI aufräumen (nur flow_msgs) ----
@@ -4089,55 +4104,7 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return ConversationHandler.END
 
-    # NEU — Gruppiert nach Aufwand (analog Kochliste in fertig_input)
-
-    # 1) Mapping & Lookups (identisch zum Ansatz in fertig_input)
-    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
-    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
-
-    # Session-Aufwand mit Vorrang (wie in fertig_input)
-    try:
-        sess = sessions.get(user_id, {})
-        _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
-    except Exception:
-        _aufwand_session = {}
-
-    def _effort_level_for(dish: str) -> int | None:
-        # a) zuerst Session
-        lvl = _aufwand_session.get(dish, None)
-        if lvl in (1, 2, 3):
-            return int(lvl)
-        # b) sonst DataFrame
-        try:
-            lvl = int(_aufwand_by_dish.get(dish, 0))
-            return lvl if lvl in (1, 2, 3) else None
-        except Exception:
-            return None
-
-    # 2) Favoriten nach Aufwand gruppieren
-    groups = {1: [], 2: [], 3: []}
-    for d in favs:
-        lvl = _effort_level_for(d)
-        if lvl in (1, 2, 3):
-            groups[lvl].append(d)
-        else:
-            # Falls kein valider Aufwand ermittelbar, ignoriere (oder optional separate Gruppe)
-            pass
-
-    # 3) Alphabetisch sortieren (case-insensitive) innerhalb jeder Gruppe
-    for lvl in (1, 2, 3):
-        groups[lvl].sort(key=lambda s: s.casefold())
-
-    # 4) Text zusammenbauen: Überschrift pro Aufwand, darunter Dreieck-Aufzählung
-    sections = []
-    for lvl in (1, 2, 3):
-        if not groups[lvl]:
-            continue
-        header = f"<u>Aufwand: {escape(_label_map[lvl])}</u>"
-        lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
-        sections.append(f"{header}\n{lines}")
-
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
+    txt = build_fav_overview_text_for(user_id)
 
     m1 = await msg.reply_text(pad_message(txt))
 
