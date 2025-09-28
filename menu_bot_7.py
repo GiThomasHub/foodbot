@@ -1750,14 +1750,14 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     # b) Initial oder sonst: Nachricht mit Tastatur senden/editen (Layout bleibt gleich)
     if q:
         msg = await q.message.reply_text(text, reply_markup=kb)
-        context.user_data["flow_msgs"] = [msg.message_id]
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     elif update.message:
         msg = await update.message.reply_text(text, reply_markup=kb)
-        context.user_data["flow_msgs"] = [msg.message_id]
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     else:
         chat_id = update.effective_chat.id
         msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-        context.user_data["flow_msgs"] = [msg.message_id]
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
 
     return MENU_COUNT
 
@@ -2305,11 +2305,13 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
 
+    # 🔧 Wichtig: Alte Vorschlagskarte (falls noch vorhanden) IMMER vorher entfernen
+    await delete_proposal_card(context, chat_id)
+
     # 1) Flow-UI zurücksetzen (nur Nachrichtenliste), Pools nicht mehr nötig
     context.user_data["flow_msgs"] = []
     context.user_data.pop("quickone_side_pools", None)  # nicht mehr genutzt
 
-    # 2) Gerichtspool initialisieren
     # 2) Gerichtspool initialisieren oder weiterverwenden
     all_dishes = [d for d in df_gerichte["Gericht"].tolist() if isinstance(d, str) and d.strip()]
     remaining = context.user_data.get("quickone_remaining")
@@ -2328,7 +2330,6 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return QUICKONE_CONFIRM
 
-
     # Favoriten (3x) × Aktiv-Gewicht
     user_favs = favorites.get(uid, [])
     wmap      = df_gerichte.set_index("Gericht")["Gewicht"].to_dict()
@@ -2342,7 +2343,7 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sessions[uid] = {
         "menues":  [dish],
         "aufwand": [int(df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].iloc[0]) if not df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].empty else 0],
-        "beilagen": {}  # leer lassen; wird erst nach 'Passt' ggf. gesetzt
+        "beilagen": {}
     }
     persist_session(update)
 
@@ -2354,7 +2355,6 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     label_txt = effort_label(lvl)
     aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
-
 
     # 4) Vorschlag + Buttons (in *derselben* Nachricht)
     text = pad_message(f"🥣 <u><b>Vorschlag:</b></u>\n\n{escape(dish)} {aufwand_label}")
@@ -2407,7 +2407,8 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
     if data == "quickone_neu":
-        # gesamte QuickOne-Flow-UI löschen, States behalten
+        # 🧹 Zuerst alte Vorschlagskarte entfernen, dann nur Flow-UI säubern
+        await delete_proposal_card(context, chat_id)
         await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
         return await quickone_start(update, context)
 
@@ -3235,52 +3236,43 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid     = str(q.from_user.id)
 
     if q.data == "swap_again":
-        # 1) Visuelles Feedback zurücksetzen
+        # Visuelles Feedback (Haken bei "Ändern")
         await mark_yes_no(q, False, "swap_ok", "swap_again")
 
-        # 2) Swap-Selection-State komplett löschen
+        # 🔧 Sofort den aktuell angezeigten Vorschlag entfernen (ersetzt werden soll!)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
+        except Exception:
+            pass
+        context.user_data.pop("proposal_msg_id", None)
+
+        # Alte Tausch-Frage (falls noch da) zuverlässig entfernen
+        await delete_last_flow_message(context, chat_id, list_key="flow_msgs")
+
+        # Swap-Selection-State resetten und neue Frage senden
         context.user_data["swap_candidates"] = set()
-
-        # 3) Nur die letzte Frage löschen (nicht die Auswahl-Liste)
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            # statt Frage löschen: Buttons am Vorschlag entfernen, damit nicht doppelt geklickt wird
-            try:
-                await q.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-
-
-        # 4) Neuer Tausche-Prompt mit leerem Kandidaten-Set
         kb = build_swap_keyboard(sessions[uid]["menues"], context.user_data["swap_candidates"])
         msg = await q.message.reply_text(
             pad_message("Welche Gerichte möchtest Du tauschen?"),
             reply_markup=kb
         )
-        context.user_data["flow_msgs"].append(msg.message_id)
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return TAUSCHE_SELECT
-
 
     if q.data == "swap_ok":
         await mark_yes_no(q, True, "swap_ok", "swap_again")
-        # nur letzte Frage löschen
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            try:
-                await q.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
 
+        # ❌ Die letzte Tausch-Frage (Keyboard) entfernen – sonst bleibt sie liegen
+        await delete_last_flow_message(context, chat_id, list_key="flow_msgs")
 
-        # 🔑 Ephemere Keys sicher resetten (sonst alte Auswahl hängen geblieben)
+        # 🔑 Ephemere Keys sicher resetten
         for k in ("menu_list", "to_process", "menu_idx", "allowed_beilage_codes", "selected_menus"):
             context.user_data.pop(k, None)
-            
-        # jetzt gleiche Beilagen-Logik wie oben in menu_confirm_cb:
+
+        # Weiter wie in menu_confirm_cb:
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+
         if show_debug_for(update):
             lines = []
             for dish in menus:
@@ -3297,18 +3289,13 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg_dbg = await q.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
 
-        # 0 Beilagen-Menüs: direkt finale Liste + Personenfrage
-
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
 
-
-        # >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
         return await ask_beilagen_yes_no(q.message, context)
 
-
-
     return ConversationHandler.END
+
 
 
 
@@ -3884,7 +3871,7 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             pass
 
-    # ZUERST: alle gemerkten Export-/Status-/Aktionsmenü-Nachrichten löschen
+    # 1) Aktions-/Export-Nachrichten entfernen
     for mid in context.user_data.get("export_msgs", []):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -3892,39 +3879,58 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
     context.user_data["export_msgs"] = []
 
-    # kurzer Abschiedsgruß → ~1.2s → löschen
+    # 2) Vorschlagskarte gezielt entfernen
+    await delete_proposal_card(context, chat_id)
+
+    # 3) Alle bekannten UI-Listen JETZT leeren (damit später nichts „nachträglich“ löscht)
+    for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]:
+        ids = context.user_data.get(key, [])
+        for mid in ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data[key] = []
+    # Ein paar Marker zurücksetzen
+    for key in ["proposal_msg_id", "final_list_msg_id"]:
+        context.user_data.pop(key, None)
+
+    # 4) Session wirklich zurücksetzen (neuer Lauf!)
+    uid = str(update.effective_user.id)
+    if uid in sessions:
+        del sessions[uid]
+    try:
+        ckey = chat_key(int(update.effective_chat.id))
+        store_delete_session(ckey)
+    except Exception:
+        pass
+
+    # 5) QuickOne-Pool beenden
+    context.user_data.pop("quickone_remaining", None)
+
+    # 6) Kurzer Abschiedsgruß → löschen → Neustart-Banner → Übersicht
     try:
         bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
         await asyncio.sleep(1.2)
         await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-        context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
     except Exception:
         pass
 
-    # Banner „Neustart: …“
     try:
-        #now = datetime.now()
-        #wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
-        #wtag = wdays[now.weekday()]
-        #stamp = now.strftime("%d. %b %Y")
-        #await context.bot.send_message(chat_id, pad_message(f"🔄 <u><b>Neustart: {wtag}, {stamp}</b></u>"))
-        #await asyncio.sleep(0.5)
-        banner = build_new_run_banner() #new
-        await context.bot.send_message(chat_id, pad_message(banner)) #new
-        await asyncio.sleep(1.0) #new
+        banner = build_new_run_banner()
+        await context.bot.send_message(chat_id, pad_message(banner))
+        await asyncio.sleep(1.0)
     except Exception:
         pass
 
-    # Übersicht posten
     await send_overview(chat_id, context)
     return ConversationHandler.END
 
 
 
+
 async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Bestätigung für '🔄 Restart' aus der Übersicht.
-    Erwartete callback_data: 'restart_yes_ov' oder 'restart_no_ov'.
-    """
+    """Bestätigung für '🔄 Restart' aus der Übersicht."""
     q = update.callback_query
     await q.answer()
     chat_id = q.message.chat.id
@@ -3937,12 +3943,35 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
 
     if data == "restart_yes_ov":
-        # Abschiedsgruß → 2s → löschen → Banner → 1s → Übersicht
+        # gleiche Aufräumlogik wie im anderen Restart
+        await delete_proposal_card(context, chat_id)
+
+        for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs", "export_msgs"]:
+            ids = context.user_data.get(key, [])
+            for mid in ids:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+            context.user_data[key] = []
+        for key in ["proposal_msg_id", "final_list_msg_id"]:
+            context.user_data.pop(key, None)
+
+        uid = str(update.effective_user.id)
+        if uid in sessions:
+            del sessions[uid]
+        try:
+            ckey = chat_key(int(update.effective_chat.id))
+            store_delete_session(ckey)
+        except Exception:
+            pass
+
+        context.user_data.pop("quickone_remaining", None)
+
         try:
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
             await asyncio.sleep(1.3)
             await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-            context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
         except Exception:
             pass
 
@@ -3953,13 +3982,11 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception:
             pass
 
-        await send_overview(chat_id, context)  # neue Übersicht als letzte Nachricht
+        await send_overview(chat_id, context)
         return ConversationHandler.END
 
-
-    # data == 'restart_no_ov' → nur die Frage war da → gelöscht, sonst nichts tun
+    # data == 'restart_no_ov'
     return ConversationHandler.END
-
 
 
 
