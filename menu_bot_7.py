@@ -332,7 +332,7 @@ def dishes_header(count: int, step: int | None = None) -> str:
     """
     base = "Dein Gericht" if count == 1 else "Deine Gerichte"
     suffix = f"({step})" if step is not None else ""
-    return f"🥣 <u>{base}{suffix}:</u>"
+    return f"🥣 <u><b>{base}:</b></u>"      #falls nummerierung nach "Deine Gerichte" bspw. "Deine Gerichte(1)" nötig: return f"🥣 <u><b>{base}{suffix}:</b></u>"
 
 # Zentral "Deine Gerichte"
 async def show_final_dishes_and_ask_persons(
@@ -616,6 +616,29 @@ def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4,
     lines.append(cur)
     return "\n".join(lines)
 
+def build_selection_debug_text(menues: list[str]) -> str:
+    """
+    Baut eine kurze DEBUG-Übersicht zur aktuellen Auswahl:
+    Aufwand-, Küchen-, Typ- und Ernährungsstil-Verteilung.
+    """
+    if not menues:
+        return ""
+    sel = df_gerichte[df_gerichte["Gericht"].isin(menues)]
+    if sel.empty:
+        return ""
+
+    from collections import Counter
+    aufwand_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Aufwand"]).items())
+    kitchen_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Küche"]).items())
+    typ_text     = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Typ"]).items())
+    einschr_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Ernährungsstil"]).items())
+
+    return (
+        f"\n📊 Aufwand-Verteilung: {aufwand_text}"
+        f"\n🎨 Küche-Verteilung: {kitchen_text}"
+        f"\n⚙️ Typ-Verteilung: {typ_text}"
+        f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
+    )
 
 
 # NEW: track IDs von Nachrichten, die wir beim Neustart gezielt löschen wollen
@@ -2183,7 +2206,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
-        if show_debug_for(update):
+        if show_debug_for(update) and side_menus:
             lines = []
             for dish in menus:
                 try:
@@ -2198,6 +2221,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             dbg = "DEBUG Beilagenvorprüfung:\n" + "\n".join(lines)
             msg_dbg = await query.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
+
 
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
@@ -2938,6 +2962,16 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n".join(f"{i+1}. {g}" for i, g in enumerate(menues))
     )
 
+    if show_debug_for(update):
+        try:
+            dbg_txt = build_selection_debug_text(menues)
+            if dbg_txt:
+                msg = await update.message.reply_text(dbg_txt)
+                track_msg(context, "flow_msgs", msg.message_id)
+        except Exception:
+            pass
+
+
 async def tausche_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_session_loaded_for_user_and_chat(update)
     """
@@ -3221,6 +3255,18 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("Ändern", callback_data="swap_again")]
             ]
         )
+
+        # --- DEBUG: Verteilungen nach dem Tausch aktualisiert ausgeben ---
+        if show_debug_for(update):
+            try:
+                dbg_txt = build_selection_debug_text(sessions[uid]["menues"])
+                if dbg_txt:
+                    dbg_msg = await q.message.reply_text(dbg_txt)
+                    track_msg(context, "flow_msgs", dbg_msg.message_id)
+            except Exception:
+                pass
+
+        
         return TAUSCHE_CONFIRM
 
 
@@ -3236,20 +3282,16 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid     = str(q.from_user.id)
 
     if q.data == "swap_again":
-        # Visuelles Feedback (Haken bei "Ändern")
-        await mark_yes_no(q, False, "swap_ok", "swap_again")
-
-        # 🔧 Sofort den aktuell angezeigten Vorschlag entfernen (ersetzt werden soll!)
+        # Buttons der Vorschlagskarte entfernen (Karte bleibt sichtbar!)
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
+            await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        context.user_data.pop("proposal_msg_id", None)
 
-        # Alte Tausch-Frage (falls noch da) zuverlässig entfernen
+        # Eine evtl. offene "Welche Gerichte..."-Frage sauber entfernen
         await delete_last_flow_message(context, chat_id, list_key="flow_msgs")
 
-        # Swap-Selection-State resetten und neue Frage senden
+        # Swap-Selection-State neu aufsetzen und Frage senden
         context.user_data["swap_candidates"] = set()
         kb = build_swap_keyboard(sessions[uid]["menues"], context.user_data["swap_candidates"])
         msg = await q.message.reply_text(
@@ -3258,6 +3300,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return TAUSCHE_SELECT
+
 
     if q.data == "swap_ok":
         await mark_yes_no(q, True, "swap_ok", "swap_again")
@@ -3273,7 +3316,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
-        if show_debug_for(update):
+        if show_debug_for(update) and side_menus:
             lines = []
             for dish in menus:
                 try:
@@ -3288,6 +3331,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             dbg = "DEBUG Beilagenvorprüfung (nach Tausch):\n" + "\n".join(lines)
             msg_dbg = await q.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
+
 
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
