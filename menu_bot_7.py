@@ -326,11 +326,11 @@ def format_amount(q):
 def dishes_header(count: int, step: int | None = None) -> str:
     """
     Baut den Titel für die Gerichte-Liste.
-    - count=1  → 'Dein Gericht:'
-    - count>1  → 'Deine Gerichte:'
+    - count=1  → 'Deine Auswahl:'
+    - count>1  → 'Deine Auswahl:'
     - step     → optionaler Debug-/Schrittzähler in Klammern, z. B. (3)
     """
-    base = "Dein Gericht" if count == 1 else "Deine Gerichte"
+    base = "Deine Auswahl" if count == 1 else "Deine Auswahl"
     suffix = f"({step})" if step is not None else ""
     return f"🥣 <u><b>{base}:</b></u>"      #falls nummerierung nach "Deine Gerichte" bspw. "Deine Gerichte(1)" nötig: return f"🥣 <u><b>{base}{suffix}:</b></u>"
 
@@ -587,6 +587,49 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
+# === Debug: Verteilungs-Message upsert (ersetzen statt neu anfügen)
+async def upsert_distribution_debug(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    *,
+    key: str = "dist_debug_msg_id"
+) -> int:
+    """
+    Ersetzt (edit) die bestehende Verteilungs-Debug-Nachricht, falls vorhanden.
+    Fallback: löscht alte und sendet neu. Tracking in flow_msgs, damit reset_flow_state(... only_keys=["flow_msgs"]) aufräumt.
+    """
+    chat_id = update.effective_chat.id
+    prev_id = context.user_data.get(key)
+
+    # 1) Versuche, bestehende Debug-Nachricht in-place zu editieren
+    if isinstance(prev_id, int):
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=prev_id, text=text)
+            return prev_id
+        except Exception:
+            # Edit ging nicht → alte (falls noch da) löschen
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=prev_id)
+            except Exception:
+                pass
+
+    # 2) Neu senden
+    msg = await context.bot.send_message(chat_id, pad_message(text))
+    context.user_data[key] = msg.message_id
+
+    # 3) flow_msgs pflegen (alter Eintrag raus, neuer rein)
+    flow = context.user_data.setdefault("flow_msgs", [])
+    if isinstance(prev_id, int):
+        try:
+            flow.remove(prev_id)
+        except ValueError:
+            pass
+    flow.append(msg.message_id)
+
+    return msg.message_id
+
+
 def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4, wrap_at: int = 60) -> str:
     from html import unescape as _unescape
     nbsp = "\u00A0"   # NBSP
@@ -654,7 +697,7 @@ def build_new_run_banner() -> str:
     wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
     wday = wdays[now.weekday()]
     stamp = now.strftime("%d. %b %Y")
-    return f"🔄<u><b>Neustart: {wday}, {stamp}</b></u>"
+    return f"🔄 <u><b>Neustart: {wday}, {stamp}</b></u>"
 
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
 
@@ -672,15 +715,7 @@ async def delete_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
         except Exception:
             pass
 
-async def send_proposal_card(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    title: str,
-    dishes: list[str] | None = None,
-    *,
-    buttons: list[list[InlineKeyboardButton]] | None = None,
-    replace_old: bool = True,
-) -> int:
+async def send_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, dishes: list[str] | None = None, *, buttons: list[list[InlineKeyboardButton]] | None = None, replace_old: bool = True,) -> int:
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
     if replace_old:
@@ -690,7 +725,12 @@ async def send_proposal_card(
         dishes = sessions.get(uid, {}).get("menues", [])
 
     header = f"🥣 <u><b>{title}</b></u>"
-    body   = "\n".join(f"{i+1}. {g}" for i, g in enumerate(dishes))
+    lines = [
+        format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
+        for g in (dishes or [])
+    ]
+    body = "\n".join(lines)
+
     kb     = InlineKeyboardMarkup(buttons) if buttons else None
 
     msg = await context.bot.send_message(chat_id, pad_message(f"{header}\n{body}"), reply_markup=kb)
@@ -1986,8 +2026,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"\n⚙️ Typ-Verteilung: {typ_text}"
                     f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
                 )
-                msg_debug = await update.message.reply_text(debug_msg)
-                context.user_data["flow_msgs"].append(msg_debug.message_id)
+                await upsert_distribution_debug(update, context, debug_msg)
 
 
             await send_proposal_card(
@@ -2132,8 +2171,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\n⚙️ Typ-Verteilung: {typ_text}"
                 f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
             )
-            msg_debug = await update.message.reply_text(debug_msg)
-            context.user_data["flow_msgs"].append(msg_debug.message_id)
+            await upsert_distribution_debug(update, context, debug_msg)
 
 
         await send_proposal_card(
@@ -2192,21 +2230,18 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = query.message.chat.id
     uid     = str(query.from_user.id)
 
+    # CODE START — menu_confirm_cb : confirm_yes ohne Ja/Nein-Umschalten
     if query.data == "confirm_yes":
-        # 1) Feedback setzen
-        await mark_yes_no(query, True, "confirm_yes", "confirm_no")
-
-        # 2)  # Buttons von der Vorschlags-Nachricht entfernen, Liste stehen lassen
+        # Buttons der Vorschlagskarte sofort entfernen (kein Umschalten auf "Ja/Nein")
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
 
-
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
-        if show_debug_for(update) and side_menus:
+        if show_debug_for(update):
             lines = []
             for dish in menus:
                 try:
@@ -2222,18 +2257,15 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             msg_dbg = await query.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
 
-
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
 
         # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
         return await ask_beilagen_yes_no(query.message, context)
-
+    
 
     if query.data == "confirm_no":
-        await mark_yes_no(query, False, "confirm_yes", "confirm_no")
-
-        #  Buttons von der Vorschlags-Nachricht entfernen, Liste stehen lassen
+        # Buttons der Vorschlagskarte sofort entfernen (kein Umschalten auf "Ja/Nein")
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -2245,6 +2277,8 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         msg = await query.message.reply_text(pad_message("Welche Gerichte möchtest Du tauschen?"), reply_markup=kb)
         context.user_data["flow_msgs"].append(msg.message_id)
         return TAUSCHE_SELECT
+
+
 
     return ConversationHandler.END
 
@@ -2955,7 +2989,8 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n⚙️ Typ-Verteilung:      {typ_text}"
             f"\n🥗 Ernährungsstil:       {einschr_text}"
         )
-        await update.message.reply_text(debug_msg)
+        await upsert_distribution_debug(update, context, debug_msg)
+
 
     await update.message.reply_text(
         "🔄 Neue Menüs:\n" +
@@ -3282,41 +3317,42 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid     = str(q.from_user.id)
 
     if q.data == "swap_again":
-        # Buttons der Vorschlagskarte entfernen (Karte bleibt sichtbar!)
-        try:
-            await q.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-        # Eine evtl. offene "Welche Gerichte..."-Frage sauber entfernen
-        await delete_last_flow_message(context, chat_id, list_key="flow_msgs")
-
-        # Swap-Selection-State neu aufsetzen und Frage senden
+        # Kein Umschalten der Buttons – nur den Auswahl-Flow neu starten
         context.user_data["swap_candidates"] = set()
+
+        # Nur die letzte Frage löschen (nicht die Liste/den Vorschlag)
+        flow = context.user_data.get("flow_msgs", [])
+        if flow:
+            last_id = flow.pop()
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
         kb = build_swap_keyboard(sessions[uid]["menues"], context.user_data["swap_candidates"])
-        msg = await q.message.reply_text(
-            pad_message("Welche Gerichte möchtest Du tauschen?"),
-            reply_markup=kb
-        )
-        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+        msg = await q.message.reply_text(pad_message("Welche Gerichte möchtest Du tauschen?"), reply_markup=kb)
+        context.user_data["flow_msgs"].append(msg.message_id)
         return TAUSCHE_SELECT
 
 
     if q.data == "swap_ok":
-        await mark_yes_no(q, True, "swap_ok", "swap_again")
+        # Buttons der Vorschlagskarte entfernen (kein Umschalten auf "Ja/Nein")
+        flow = context.user_data.get("flow_msgs", [])
+        if flow:
+            last_id = flow.pop()
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
 
-        # ❌ Die letzte Tausch-Frage (Keyboard) entfernen – sonst bleibt sie liegen
-        await delete_last_flow_message(context, chat_id, list_key="flow_msgs")
-
-        # 🔑 Ephemere Keys sicher resetten
+        # 🔑 Ephemere Keys sicher resetten (sonst alte Auswahl hängen geblieben)
         for k in ("menu_list", "to_process", "menu_idx", "allowed_beilage_codes", "selected_menus"):
             context.user_data.pop(k, None)
 
-        # Weiter wie in menu_confirm_cb:
+        # jetzt gleiche Beilagen-Logik wie oben in menu_confirm_cb:
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
-
-        if show_debug_for(update) and side_menus:
+        if show_debug_for(update):
             lines = []
             for dish in menus:
                 try:
@@ -3332,11 +3368,12 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg_dbg = await q.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
 
-
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
 
         return await ask_beilagen_yes_no(q.message, context)
+# CODE SCHLUSS
+
 
     return ConversationHandler.END
 
@@ -3878,15 +3915,14 @@ async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         InlineKeyboardButton("Nein", callback_data="restart_no_ov"),
     ]])
 
-    # Neue Nachricht als REPLY auf die Übersicht senden (visuell „direkt darunter“ angehängt)
     await context.bot.send_message(
         chat_id=chat_id,
         text=confirm_text,
-        reply_markup=kb,
-        reply_to_message_id=q.message.message_id,
-        allow_sending_without_reply=True
+        reply_markup=kb
     )
     return ConversationHandler.END
+
+
 
 
 async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3952,20 +3988,33 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 5) QuickOne-Pool beenden
     context.user_data.pop("quickone_remaining", None)
 
-    # 6) Kurzer Abschiedsgruß → löschen → Neustart-Banner → Übersicht
+    # 6) kurzer Abschiedsgruß → danach IN-PLACE in Neustart-Banner verwandeln
     try:
         bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
         await asyncio.sleep(1.2)
-        await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-    except Exception:
-        pass
 
-    try:
         banner = build_new_run_banner()
-        await context.bot.send_message(chat_id, pad_message(banner))
+        # Wichtiges Caveat: Diese Nachricht NICHT in export_msgs tracken!
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=bye.message_id,
+            text=pad_message(banner),
+        )
+        context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
         await asyncio.sleep(1.0)
     except Exception:
-        pass
+        # Fallback: wenn Edit scheitert → Bye (falls möglich) löschen und Banner frisch posten
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+        except Exception:
+            pass
+        try:
+            banner = build_new_run_banner()
+            await context.bot.send_message(chat_id, pad_message(banner))
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass
+
 
     await send_overview(chat_id, context)
     return ConversationHandler.END
@@ -4012,19 +4061,33 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         context.user_data.pop("quickone_remaining", None)
 
+        # Abschiedsgruß → danach IN-PLACE in Neustart-Banner verwandeln
         try:
             bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
             await asyncio.sleep(1.3)
-            await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-        except Exception:
-            pass
 
-        try:
             banner = build_new_run_banner()
-            await context.bot.send_message(chat_id, pad_message(banner))
+            # Wichtiges Caveat: Diese Nachricht NICHT in export_msgs tracken!
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=bye.message_id,
+                text=pad_message(banner),
+            )
+            context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
             await asyncio.sleep(1.0)
         except Exception:
-            pass
+            # Fallback: wenn Edit scheitert → Bye (falls möglich) löschen und Banner frisch posten
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+            except Exception:
+                pass
+            try:
+                banner = build_new_run_banner()
+                await context.bot.send_message(chat_id, pad_message(banner))
+                await asyncio.sleep(1.0)
+            except Exception:
+                pass
+
 
         await send_overview(chat_id, context)
         return ConversationHandler.END
