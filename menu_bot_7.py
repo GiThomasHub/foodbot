@@ -697,7 +697,7 @@ def build_new_run_banner() -> str:
     wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
     wday = wdays[now.weekday()]
     stamp = now.strftime("%d. %b %Y")
-    return f"🔄 <u><b>Neustart: {wday}, {stamp}</b></u>"
+    return f"\n\n🔄 <u><b>Neustart: {wday}, {stamp}</b></u>\n\n"
 
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
 
@@ -890,7 +890,7 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
         for n in nums
     ]
-    done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
+    done_label = "✔️ Weiter" if isinstance(sel, int) else "(wähle oben)"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="persons_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
     prompt = "Für wie viele Personen soll die Einkaufs- und Kochliste erstellt werden?"
@@ -1800,7 +1800,7 @@ async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
         InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
         for n in nums
     ]
-    done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
+    done_label = "✔️ Weiter" if isinstance(sel, int) else "(wähle oben)"
     footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
     kb = InlineKeyboardMarkup([row_numbers, footer])
     text = pad_message("Wie viele Gerichte soll ich vorschlagen?")
@@ -2035,7 +2035,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 dishes=final_gerichte,
                 buttons=[
                     [InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
-                     InlineKeyboardButton("Ändern",  callback_data="confirm_no")]
+                     InlineKeyboardButton("Austauschen",  callback_data="confirm_no")]
                 ]
             )
             return ASK_CONFIRM
@@ -2180,7 +2180,7 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dishes=ausgewaehlt,
             buttons=[
                 [InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
-                 InlineKeyboardButton("Ändern",  callback_data="confirm_no")]
+                 InlineKeyboardButton("Austauschen",  callback_data="confirm_no")]
             ]
         )
         return ASK_CONFIRM
@@ -3001,8 +3001,7 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             dbg_txt = build_selection_debug_text(menues)
             if dbg_txt:
-                msg = await update.message.reply_text(dbg_txt)
-                track_msg(context, "flow_msgs", msg.message_id)
+                await upsert_distribution_debug(update, context, dbg_txt)
         except Exception:
             pass
 
@@ -3287,7 +3286,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dishes=menues,
             buttons=[
                 [InlineKeyboardButton("Passt",  callback_data="swap_ok"),
-                 InlineKeyboardButton("Ändern", callback_data="swap_again")]
+                 InlineKeyboardButton("Austauschen", callback_data="swap_again")]
             ]
         )
 
@@ -3296,16 +3295,11 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 dbg_txt = build_selection_debug_text(sessions[uid]["menues"])
                 if dbg_txt:
-                    dbg_msg = await q.message.reply_text(dbg_txt)
-                    track_msg(context, "flow_msgs", dbg_msg.message_id)
+                    await upsert_distribution_debug(update, context, dbg_txt)
             except Exception:
                 pass
 
-        
         return TAUSCHE_CONFIRM
-
-
-
 
 
 # ─────────── tausche_confirm_cb ───────────
