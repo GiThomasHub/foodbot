@@ -219,10 +219,7 @@ WEIGHT_CHOICES["weight_any"] = None          #  «Egal» = keine Einschränkung
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # Nur für Admins: Aufwand-Verteilung anzeigen
-def show_debug_for(update: Update) -> bool:
-    """
-    Admin-Erkennung: per ENV ADMIN_IDS="123,456" (Secrets) oder Fallback auf die bisherige ID.
-    """
+def show_debug_for(obj) -> bool:
     default_ids = {7650843881}
     raw = (os.getenv("ADMIN_IDS") or "").strip()
     try:
@@ -230,8 +227,20 @@ def show_debug_for(update: Update) -> bool:
     except ValueError:
         env_ids = set()
     admin_ids = env_ids or default_ids
-    u = getattr(update, "effective_user", None)
-    return bool(u and u.id in admin_ids)
+
+    uid = None
+    # Update
+    if getattr(obj, "effective_user", None):
+        uid = obj.effective_user.id
+    # CallbackQuery
+    elif getattr(obj, "from_user", None):
+        uid = obj.from_user.id
+    # Message (Fallback)
+    elif getattr(obj, "message", None) and getattr(obj.message, "from_user", None):
+        uid = obj.message.from_user.id
+
+    return uid in admin_ids if uid is not None else False
+
 
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
@@ -588,27 +597,17 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
     return first + ("\n" + rest if rest else "")
 
 # === Debug: Verteilungs-Message upsert (ersetzen statt neu anfügen)
-async def upsert_distribution_debug(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    text: str,
-    *,
-    key: str = "dist_debug_msg_id"
-) -> int:
-    """
-    Ersetzt (edit) die bestehende Verteilungs-Debug-Nachricht, falls vorhanden.
-    Fallback: löscht alte und sendet neu. Tracking in flow_msgs, damit reset_flow_state(... only_keys=["flow_msgs"]) aufräumt.
-    """
+async def upsert_distribution_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, *, key: str = "dist_debug_msg_id") -> int:
     chat_id = update.effective_chat.id
     prev_id = context.user_data.get(key)
 
-    # 1) Versuche, bestehende Debug-Nachricht in-place zu editieren
+    # 1) Bestehende Debug-Message in-place updaten
     if isinstance(prev_id, int):
         try:
             await context.bot.edit_message_text(chat_id=chat_id, message_id=prev_id, text=text)
             return prev_id
         except Exception:
-            # Edit ging nicht → alte (falls noch da) löschen
+            # Fallback: alte Debug-Message weg
             try:
                 await context.bot.delete_message(chat_id=chat_id, message_id=prev_id)
             except Exception:
@@ -617,17 +616,8 @@ async def upsert_distribution_debug(
     # 2) Neu senden
     msg = await context.bot.send_message(chat_id, pad_message(text))
     context.user_data[key] = msg.message_id
-
-    # 3) flow_msgs pflegen (alter Eintrag raus, neuer rein)
-    flow = context.user_data.setdefault("flow_msgs", [])
-    if isinstance(prev_id, int):
-        try:
-            flow.remove(prev_id)
-        except ValueError:
-            pass
-    flow.append(msg.message_id)
-
     return msg.message_id
+
 
 
 def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4, wrap_at: int = 60) -> str:
@@ -697,7 +687,7 @@ def build_new_run_banner() -> str:
     wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
     wday = wdays[now.weekday()]
     stamp = now.strftime("%d. %b %Y")
-    return f"\n\n🔄 <u><b>Neustart: {wday}, {stamp}</b></u>\n\n"
+    return f"🔄 <u><b>Neustart: {wday}, {stamp}</b></u>"
 
 ##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
 
@@ -708,12 +698,22 @@ def track_msg(context: ContextTypes.DEFAULT_TYPE, key: str, mid: int) -> None:
         context.user_data.setdefault(key, []).append(mid)
 
 async def delete_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    # Vorschlagskarte
     pid = context.user_data.pop("proposal_msg_id", None)
     if isinstance(pid, int):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=pid)
         except Exception:
             pass
+
+    # Verteilungs-Debug
+    did = context.user_data.pop("dist_debug_msg_id", None)
+    if isinstance(did, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=did)
+        except Exception:
+            pass
+
 
 async def send_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, dishes: list[str] | None = None, *, buttons: list[list[InlineKeyboardButton]] | None = None, replace_old: bool = True,) -> int:
     uid = str(update.effective_user.id)
@@ -2241,6 +2241,11 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+
+        # erst jetzt: wenn KEINE Beilagen möglich sind -> direkt weiter, ohne Debug
+        if not side_menus:
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
+    
         if show_debug_for(update):
             lines = []
             for dish in menus:
@@ -2256,9 +2261,6 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             dbg = "DEBUG Beilagenvorprüfung:\n" + "\n".join(lines)
             msg_dbg = await query.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
-
-        if not side_menus:
-            return await show_final_dishes_and_ask_persons(update, context, step=2)
 
         # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
         return await ask_beilagen_yes_no(query.message, context)
@@ -2745,13 +2747,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_profile_choice_keyboard() -> InlineKeyboardMarkup:
     """Inline-Buttons für die Frage ›Wie möchtest Du fortfahren?‹"""
     kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("...mit bestehendem Profil",  callback_data="prof_exist")],
+        [InlineKeyboardButton("...ohne Einschränkung",  callback_data="prof_nolim"),],
         [
-            InlineKeyboardButton("Bestehendes Profil",  callback_data="prof_exist"),
-            InlineKeyboardButton("Ohne Einschränkung",  callback_data="prof_nolim"),
-        ],
-        [
-            InlineKeyboardButton("Neues Profil",        callback_data="prof_new"),
-            InlineKeyboardButton("Mein Profil",         callback_data="prof_show"),
+            InlineKeyboardButton("✍️ Profil erstellen",        callback_data="prof_new"),
+            InlineKeyboardButton("👀 Profil anzeigen",         callback_data="prof_show"),
         ]
     ])
     return kb
@@ -3346,6 +3346,10 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # jetzt gleiche Beilagen-Logik wie oben in menu_confirm_cb:
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+        
+        if not side_menus:
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
+            
         if show_debug_for(update):
             lines = []
             for dish in menus:
@@ -3362,8 +3366,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             msg_dbg = await q.message.reply_text(dbg)
             context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
 
-        if not side_menus:
-            return await show_final_dishes_and_ask_persons(update, context, step=2)
+
 
         return await ask_beilagen_yes_no(q.message, context)
 # CODE SCHLUSS
