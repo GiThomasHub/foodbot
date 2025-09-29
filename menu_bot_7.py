@@ -344,36 +344,22 @@ def dishes_header(count: int, step: int | None = None) -> str:
     return f"🥣 <u><b>{base}:</b></u>"      #falls nummerierung nach "Deine Gerichte" bspw. "Deine Gerichte(1)" nötig: return f"🥣 <u><b>{base}{suffix}:</b></u>"
 
 # Zentral "Deine Gerichte"
-async def show_final_dishes_and_ask_persons(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    step: int | None = None,
-    remove_proposal: bool = True,
-    clear_flow: bool = True,
-) -> int:
+async def show_final_dishes_and_ask_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step: int | None = None, remove_proposal: bool = True, clear_flow: bool = True,) -> int:
     """
     Zentrale Ausgabe:
-      1) optional 'Mein/Neuer Vorschlag' entfernen (proposal_msg_id)
-      2) optional Debug/flow-Messages löschen (only flow_msgs)
-      3) 'Dein(e) Gericht(e)' rendern
+      1) optional 'Vorschlag/Neuer Vorschlag' + zugehöriges Verteilungs-Debug entfernen
+      2) optional Debug/flow-Messages (flow_msgs) löschen
+      3) finale Gerichteliste rendern
       4) Personen-Dialog starten
-
-    Rückgabe: State der Personen-Auswahl.
     """
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # 1) Vorschlagskarte (falls vorhanden) löschen
+    # 1) Karte + Debug IMMER als Paar behandeln
     if remove_proposal:
-        pid = context.user_data.pop("proposal_msg_id", None)
-        if isinstance(pid, int):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=pid)
-            except Exception:
-                pass
+        await delete_proposal_card(context, chat_id)
 
-    # 2) Debug/flow-Messages aufräumen (flow_msgs)
+    # 2) Flow-Messages aufräumen
     if clear_flow:
         await reset_flow_state(
             update, context,
@@ -381,7 +367,7 @@ async def show_final_dishes_and_ask_persons(
             only_keys=["flow_msgs"]
         )
 
-    # 3) Finale Liste aufbauen
+    # 3) Finale Liste
     menus = sessions.get(uid, {}).get("menues", [])
     text  = dishes_header(len(menus), step=step) + "\n"
     for dish in menus:
@@ -397,6 +383,7 @@ async def show_final_dishes_and_ask_persons(
 
     # 4) Personen-Dialog
     return await ask_for_persons(update, context)
+
 
 
 # ---- Debounced Redraw für 'Definiere Aufwand' ----
@@ -618,6 +605,43 @@ async def upsert_distribution_debug(update: Update, context: ContextTypes.DEFAUL
     context.user_data[key] = msg.message_id
     return msg.message_id
 
+async def render_proposal_with_debug(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    title: str,
+    dishes: list[str],
+    buttons: list[list[InlineKeyboardButton]],
+    replace_old: bool = True,
+) -> int:
+    """
+    Löscht optional das alte Paar (Debug + Vorschlag), sendet dann das Debug
+    SCHÖN OBERHALB der Karte und direkt darunter die Vorschlagskarte.
+    Rückgabe: message_id der Vorschlagskarte.
+    """
+    chat_id = update.effective_chat.id
+
+    # 1) Altes Paar (Debug + Karte) wegräumen
+    if replace_old:
+        await delete_proposal_card(context, chat_id)
+
+    # 2) Debug OBEN drüber, falls Admin
+    if show_debug_for(update):
+        try:
+            dbg_txt = build_selection_debug_text(dishes)
+            if dbg_txt:
+                await upsert_distribution_debug(update, context, dbg_txt)
+        except Exception:
+            pass
+
+    # 3) Karte direkt darunter senden (jetzt NICHTS mehr löschen)
+    return await send_proposal_card(
+        update, context,
+        title=title,
+        dishes=dishes,
+        buttons=buttons,
+        replace_old=False
+    )
 
 
 def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4, wrap_at: int = 60) -> str:
@@ -1999,46 +2023,18 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             persist_session(update)
 
 
-            if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
-                # Extrahiere Zusatzinfos zu den gewählten Gerichten
-                gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(final_gerichte)]
-
-                # Aufwand-Verteilung
-                aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
-                aufwand_text = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
-
-                # Küche-Verteilung
-                kitchen_counter = Counter(gewaehlte_gerichte["Küche"])
-                kitchen_text = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
-
-                # Art-Verteilung
-                typ_counter = Counter(gewaehlte_gerichte["Typ"])
-                typ_text = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
-
-                # Einschränkung-Verteilung
-                einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
-                einschr_text = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
-
-                # Erweiterte Debug-Nachricht zusammenbauen
-                debug_msg = (
-                    f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-                    f"\n🎨 Küche-Verteilung: {kitchen_text}"
-                    f"\n⚙️ Typ-Verteilung: {typ_text}"
-                    f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
-                )
-                await upsert_distribution_debug(update, context, debug_msg)
-
-
-            await send_proposal_card(
+            await render_proposal_with_debug(
                 update, context,
                 title="Vorschlag:",
                 dishes=final_gerichte,
                 buttons=[
-                    [InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
-                     InlineKeyboardButton("Austauschen",  callback_data="confirm_no")]
-                ]
+                    [InlineKeyboardButton("Passt", callback_data="confirm_yes"),
+                     InlineKeyboardButton("Austauschen", callback_data="confirm_no")]
+                ],
+                replace_old=True
             )
             return ASK_CONFIRM
+
 
 
         # ---------- Basis-DataFrame gemäss Profil ----------------------
@@ -2144,46 +2140,18 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions[user_id] = {"menues": ausgewaehlt, "aufwand": aufwand_liste}
         persist_session(update)
 
-        if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
-            # Extrahiere Zusatzinfos zu den gewählten Gerichten
-            gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(ausgewaehlt)]
-
-            # Aufwand-Verteilung
-            aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
-            aufwand_text = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
-
-            # Küche-Verteilung
-            kitchen_counter = Counter(gewaehlte_gerichte["Küche"])
-            kitchen_text = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
-
-            # Typ-Verteilung
-            typ_counter = Counter(gewaehlte_gerichte["Typ"])
-            typ_text = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
-
-            # Ernährungsstil-Verteilung
-            einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
-            einschr_text = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
-
-            # Erweiterte Debug-Nachricht zusammenbauen
-            debug_msg = (
-                f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-                f"\n🎨 Küche-Verteilung: {kitchen_text}"
-                f"\n⚙️ Typ-Verteilung: {typ_text}"
-                f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
-            )
-            await upsert_distribution_debug(update, context, debug_msg)
-
-
-        await send_proposal_card(
+        await render_proposal_with_debug(
             update, context,
             title="Vorschlag:",
             dishes=ausgewaehlt,
             buttons=[
-                [InlineKeyboardButton("Passt",   callback_data="confirm_yes"),
-                 InlineKeyboardButton("Austauschen",  callback_data="confirm_no")]
-            ]
+                [InlineKeyboardButton("Passt", callback_data="confirm_yes"),
+                 InlineKeyboardButton("Austauschen", callback_data="confirm_no")]
+            ],
+            replace_old=True
         )
         return ASK_CONFIRM
+
 
 
 
@@ -3068,13 +3036,11 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "aufwand_rand":
         # zufällige Verteilung auf 3 Klassen, Summe = total
         total = context.user_data["menu_count"]
-        # drei Klassen gleichwahrscheinlich
         picks = [random.choice(("light", "medium", "heavy")) for _ in range(total)]
         verteilung["light"]  = picks.count("light")
         verteilung["medium"] = picks.count("medium")
         verteilung["heavy"]  = picks.count("heavy")
 
-        # sofort neu rendern
         await query.message.edit_reply_markup(
             reply_markup=build_aufwand_keyboard(verteilung, total)
         )
@@ -3090,7 +3056,16 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         a3 = verteilung["heavy"]
         total = a1 + a2 + a3  # sichere Gesamtmenge
 
-        # Aufwands-Nachricht sofort entfernen
+        # 🚫 WICHTIG: evtl. geplanten Debounce-Render abbrechen (gegen „erst Buttons weg, dann Text weg“)
+        task = context.user_data.pop("aufw_render_task", None)
+        if task and not task.done():
+            try:
+                task.cancel()
+            except Exception:
+                pass
+        context.user_data["aufw_dirty"] = False
+
+        # Nachricht EINMALIG komplett löschen (Buttons + Text zusammen)
         try:
             await context.bot.delete_message(
                 chat_id=query.message.chat.id,
@@ -3101,10 +3076,9 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return await menu_input_direct(f"{total} ({a1},{a2},{a3})", update, context)
 
-
-
     elif data == "noop":
         return MENU_AUFWAND
+
 
 
 
@@ -3280,26 +3254,18 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         #    context.user_data["flow_msgs"].append(msg_debug.message_id)
             
         # Neuen Vorschlag posten
-        await send_proposal_card(
+        await render_proposal_with_debug(
             update, context,
             title="Neuer Vorschlag:",
             dishes=menues,
             buttons=[
                 [InlineKeyboardButton("Passt",  callback_data="swap_ok"),
                  InlineKeyboardButton("Austauschen", callback_data="swap_again")]
-            ]
+            ],
+            replace_old=True
         )
-
-        # --- DEBUG: Verteilungen nach dem Tausch aktualisiert ausgeben ---
-        if show_debug_for(update):
-            try:
-                dbg_txt = build_selection_debug_text(sessions[uid]["menues"])
-                if dbg_txt:
-                    await upsert_distribution_debug(update, context, dbg_txt)
-            except Exception:
-                pass
-
         return TAUSCHE_CONFIRM
+
 
 
 # ─────────── tausche_confirm_cb ───────────
