@@ -761,42 +761,6 @@ async def send_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
     context.user_data["proposal_msg_id"] = msg.message_id
     return msg.message_id
 
-def _proposal_message_text(title: str, dishes: list[str]) -> str:
-    header = f"🥣 <u><b>{title}</b></u>"
-    lines = [
-        format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
-        for g in (dishes or [])
-    ]
-    body = "\n".join(lines)
-    return pad_message(f"{header}\n{body}")
-
-async def edit_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE, *, title: str, dishes: list[str], buttons: list[list[InlineKeyboardButton]] | None = None,) -> int:
-    """
-    Editiere die existierende Vorschlagskarte in-place (Text + Buttons).
-    Fallback: neu senden, falls Edit nicht möglich. Gibt message_id der Karte zurück.
-    """
-    chat_id = update.effective_chat.id
-    pid = context.user_data.get("proposal_msg_id")
-    kb = InlineKeyboardMarkup(buttons) if buttons else None
-    text = _proposal_message_text(title, dishes)
-
-    if isinstance(pid, int):
-        try:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=pid, text=text, reply_markup=kb)
-            return pid
-        except Exception:
-            # Fallback: löschen und neu senden (z.B. zu alt)
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=pid)
-            except Exception:
-                pass
-    # Neu senden
-    msg = await context.bot.send_message(chat_id, text, reply_markup=kb)
-    context.user_data["proposal_msg_id"] = msg.message_id
-    return msg.message_id
-
-
-    
 async def ask_beilagen_yes_no(anchor_msg, context: ContextTypes.DEFAULT_TYPE) -> int:
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Ja", callback_data="ask_yes"),
@@ -2443,7 +2407,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = q.data
 
     if data == "quickone_passt":
-        # Buttons am Vorschlag entfernen
+        # Buttons am Vorschlag entfernen, Text "Mein Vorschlag" beibehalten
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -2452,11 +2416,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         dish = sessions[uid]["menues"][0]
         allowed = allowed_sides_for_dish(dish)
 
-        # Keine Beilagen möglich → direkt Personen
-        if not allowed:
-            return await show_final_dishes_and_ask_persons(update, context, step=2)
-
-        # 🔎 DEBUG Beilagenvorprüfung VOR der Frage anzeigen (neu)
+        # 🔎 DEBUG Beilagen-Vorprüfung VOR der Frage anzeigen
         if show_debug_for(update):
             try:
                 try:
@@ -2467,19 +2427,30 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
                 codes = parse_codes(raw)
                 nz = [c for c in codes if c != 0]
                 allowed_list = sorted(list(allowed))[:12]
-                dbg = "DEBUG Beilagenvorprüfung:\n" + f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed_list} (n={len(allowed_list)})"
+                dbg = (
+                    "DEBUG Beilagenvorprüfung:\n"
+                    f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed_list} (n={len(allowed_list)})"
+                )
                 msg_dbg = await q.message.reply_text(dbg)
                 context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
             except Exception:
                 pass
 
-        # Jetzt erst die Ja/Nein-Frage
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("Ja", callback_data="quickone_ask_yes"),
-                                InlineKeyboardButton("Nein", callback_data="quickone_ask_no")]])
-        msg = await q.message.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
+        # Keine Beilagen möglich → direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
+        if not allowed:
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
+
+        # Beilagen möglich → separate Beilagen-Frage senden (Vorschlag bleibt sichtbar)
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Ja",   callback_data="quickone_ask_yes"),
+            InlineKeyboardButton("Nein", callback_data="quickone_ask_no"),
+        ]])
+        msg = await q.message.reply_text(
+            pad_message("Möchtest Du Beilagen hinzufügen?"),
+            reply_markup=kb
+        )
         context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return QUICKONE_CONFIRM
-
 
 
 
@@ -3191,8 +3162,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3) 'Weiter' mit Auswahl → alten Vorschlag + Tauschfrage löschen, neuen Vorschlag senden
     if data == "swap_done":
-    if data == "swap_done":
-        # --- Profil / Basis ---
+        # 1) Profil-hard filter + Basis-DataFrame
         profile  = profiles.get(uid)
         basis_df = apply_profile_filters(df_gerichte, profile)
 
@@ -3213,12 +3183,16 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_art   = ART_ORDER.get(row_cur["Typ"], 2)
 
             other_sel = set(menues) - {current_dish}
-            cands = set(basis_df[basis_df["Aufwand"] == current_aufw]["Gericht"]) - {current_dish} - other_sel
+            cands = set(
+                basis_df[basis_df["Aufwand"] == current_aufw]["Gericht"]
+            ) - {current_dish} - other_sel
 
             if not cands:
                 for lvl in (current_aufw - 1, current_aufw + 1):
                     if 1 <= lvl <= 3:
-                        fb = set(basis_df[basis_df["Aufwand"] == lvl]["Gericht"]) - {current_dish} - other_sel
+                        fb = set(
+                            basis_df[basis_df["Aufwand"] == lvl]["Gericht"]
+                        ) - {current_dish} - other_sel
                         if fb:
                             cands = fb
                             break
@@ -3226,7 +3200,9 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             used = set(swap_history[current_aufw])
             pool = list(cands - used)
             if not pool:
-                swap_history[current_aufw] = [m for m, lv in zip(menues, aufw) if lv == current_aufw]
+                swap_history[current_aufw] = [
+                    m for m, lv in zip(menues, aufw) if lv == current_aufw
+                ]
                 used = set(swap_history[current_aufw])
                 pool = list(cands - used)
             if not pool:
@@ -3240,6 +3216,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 d_aw     = abs(current_aufw - cand_aw)
                 d_art    = abs(current_art   - cand_art)
                 scored.append((cand, (d_aw, d_art)))
+
             min_score = min(score for _, score in scored)
             best      = [c for c, score in scored if score == min_score]
 
@@ -3254,7 +3231,9 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             neu = random.choices(best, weights=weights, k=1)[0]
 
             menues[slot] = neu
-            sessions[uid]["aufwand"][slot] = int(df_gerichte.loc[df_gerichte["Gericht"] == neu, "Aufwand"].iloc[0])
+            sessions[uid]["aufwand"][slot] = int(
+                df_gerichte.loc[df_gerichte["Gericht"] == neu, "Aufwand"].iloc[0]
+            )
             swap_history[current_aufw].append(neu)
             sessions[uid]["beilagen"].pop(current_dish, None)
             swapped_slots.append(idx)
@@ -3264,7 +3243,10 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ❌ Nur die Tauschfrage-Nachricht löschen (Buttons + Text)
         try:
-            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=q.message.message_id)
+            await context.bot.delete_message(
+                chat_id=q.message.chat.id,
+                message_id=q.message.message_id
+            )
         except Exception:
             pass
         # aus flow_msgs austragen, falls dort gemerkt
@@ -3286,16 +3268,18 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🟩 Vorschlagskarte IN-PLACE zu „Neuer Vorschlag“ editieren
         await edit_proposal_card(
-            update, context,
+            update,
+            context,
             title="Neuer Vorschlag:",
             dishes=menues,
             buttons=[
-                [InlineKeyboardButton("Passt",  callback_data="swap_ok"),
-                 InlineKeyboardButton("Austauschen", callback_data="swap_again")]
-            ]
+                [
+                    InlineKeyboardButton("Passt", callback_data="swap_ok"),
+                    InlineKeyboardButton("Austauschen", callback_data="swap_again"),
+                ]
+            ],
         )
         return TAUSCHE_CONFIRM
-
 
 
 
