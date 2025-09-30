@@ -571,6 +571,29 @@ async def cleanup_prof_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     context.user_data["prof_msgs"] = []
 
 
+async def cleanup_prof_loop_except_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """
+    Löscht alle während des Profil-Wizards entstandenen Nachrichten,
+    AUSGENOMMEN die gemerkte Startfrage 'Wie möchtest Du fortfahren?'.
+    """
+    start_id = context.user_data.get("prof_start_msg_id")
+    msg_ids: list[int] = context.user_data.get("prof_msgs", [])
+
+    for mid in msg_ids:
+        if isinstance(start_id, int) and mid == start_id:
+            continue
+        try:
+            await context.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+    # Liste auf die Startfrage reduzieren (falls vorhanden)
+    if isinstance(start_id, int):
+        context.user_data["prof_msgs"] = [start_id]
+    else:
+        context.user_data["prof_msgs"] = []
+
+
 def pad_message(text: str, min_width: int = 35) -> str:                       # definiert breite der nachrichten bzw. min breite
     """
     Füllt **nur die erste Zeile** von `text` mit Non-Breaking Spaces (U+00A0)
@@ -582,6 +605,64 @@ def pad_message(text: str, min_width: int = 35) -> str:                       # 
     if len(first) < min_width:
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
+
+async def safe_delete_and_untrack(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, list_key: str = "flow_msgs") -> None:
+    """
+    Löscht eine Nachricht tolerant und entfernt deren ID aus der gegebenen Tracking-Liste.
+    """
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+    try:
+        ids = context.user_data.get(list_key, [])
+        if isinstance(ids, list):
+            ids[:] = [mid for mid in ids if mid != message_id]
+    except Exception:
+        pass
+
+
+async def render_beilage_precheck_debug(update_or_query, context: ContextTypes.DEFAULT_TYPE, dishes_or_single, prefix: str = "DEBUG Beilagenvorprüfung:") -> None:
+    """
+    Baut und sendet den DEBUG-Text zur Beilagen-Vorprüfung für ein einzelnes Gericht oder eine Liste von Gerichten.
+    Nachricht wird in flow_msgs getrackt.
+    """
+    if not show_debug_for(update_or_query):
+        return
+
+    try:
+        # unify: ein Gericht → Liste
+        if isinstance(dishes_or_single, str):
+            dishes = [dishes_or_single]
+        else:
+            dishes = list(dishes_or_single or [])
+
+        lines = []
+        for dish in dishes:
+            try:
+                raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
+                raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
+            except Exception:
+                raw = "<err>"
+            codes = parse_codes(raw)
+            nz = [c for c in codes if c != 0]
+            allowed = sorted(list(allowed_sides_for_dish(dish)))[:12]
+            lines.append(f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed} (n={len(allowed)})")
+
+        if not lines:
+            return
+
+        dbg = prefix + "\n" + "\n".join(lines)
+
+        # robust: update_or_query kann Update oder CallbackQuery sein
+        msg_obj = getattr(update_or_query, "message", None) or getattr(update_or_query, "effective_message", None)
+        if msg_obj is None:
+            return
+        m = await msg_obj.reply_text(dbg)
+        context.user_data.setdefault("flow_msgs", []).append(m.message_id)
+    except Exception:
+        pass
+
 
 # === Debug: Verteilungs-Message upsert (ersetzen statt neu anfügen)
 async def upsert_distribution_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, *, key: str = "dist_debug_msg_id") -> int:
@@ -1515,6 +1596,8 @@ async def menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     # erste Message fürs spätere Cleanup merken
     context.user_data["prof_msgs"].append(sent.message_id)
+    context.user_data["prof_start_msg_id"] = sent.message_id
+
     return PROFILE_CHOICE
 
 async def menu_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1530,6 +1613,7 @@ async def menu_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_profile_choice_keyboard(),
     )
     context.user_data["prof_msgs"].append(sent.message_id)
+    context.user_data["prof_start_msg_id"] = sent.message_id
     return PROFILE_CHOICE
 
 
@@ -1600,12 +1684,44 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== 1)  Bestehendes Profil =========================================
     if choice == "prof_exist":
         if ensure_profile_loaded(uid):
-            # Profil vorhanden → Wizard-Messages weg, sofort zum alten Flow
-            await cleanup_prof_loop(context, q.message.chat_id)
-            return await start_menu_count_flow(update, context)
+            # In-place Edit der Startfrage → "Wie viele Gerichte...?"
+            context.user_data.pop("menu_count_sel", None)
+            context.user_data["menu_count_page"] = "low"
 
+            kb = build_menu_count_inline_kb(None, "low")
+            try:
+                await q.message.edit_text(
+                    pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                    reply_markup=kb
+                )
+            except Exception:
+                # Fallback: wenn Edit nicht möglich, neue Nachricht senden
+                msg = await q.message.reply_text(
+                    pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                    reply_markup=kb
+                )
+                # Tracking: neu gesendete Nachricht in flow_msgs
+                context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+            else:
+                # Tracking: die ehem. Startfrage von prof_msgs → flow_msgs verschieben
+                try:
+                    context.user_data.get("prof_msgs", []).remove(q.message.message_id)
+                except Exception:
+                    pass
+                context.user_data.setdefault("flow_msgs", []).append(q.message.message_id)
+                # Startfrage-ID aufräumen, weil jetzt Flow-Nachricht
+                if context.user_data.get("prof_start_msg_id") == q.message.message_id:
+                    context.user_data.pop("prof_start_msg_id", None)
 
-        # Kein Profil ⇒ Hinweis + Wizard starten
+            return MENU_COUNT
+
+        # Kein Profil ⇒ Hinweis + Wizard starten (unverändert)
+        async def send_and_log(text: str, *, store_id: bool = True, **kwargs):
+            msg = await q.message.reply_text(text, **kwargs)
+            if store_id:
+                context.user_data.setdefault("prof_msgs", []).append(msg.message_id)
+            return msg
+
         await send_and_log("Es besteht noch kein Profil. Erstelle eines!")
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
@@ -1614,12 +1730,38 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return PROFILE_NEW_A
 
+
     # ===== 2)  Ohne Einschränkung =========================================
     if choice == "prof_nolim":
-        # Wizard-Nachrichten löschen (falls vorhanden) und direkt weiter
-        await cleanup_prof_loop(context, q.message.chat_id)
-        return await start_menu_count_flow(update, context)
+        # In-place Edit der Startfrage → "Wie viele Gerichte...?"
+        context.user_data.pop("menu_count_sel", None)
+        context.user_data["menu_count_page"] = "low"
 
+        kb = build_menu_count_inline_kb(None, "low")
+        try:
+            await q.message.edit_text(
+                pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                reply_markup=kb
+            )
+        except Exception:
+            # Fallback: wenn Edit nicht möglich, neue Nachricht senden
+            msg = await q.message.reply_text(
+                pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                reply_markup=kb
+            )
+            context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+        else:
+            # Tracking: die ehem. Startfrage von prof_msgs → flow_msgs verschieben
+            try:
+                context.user_data.get("prof_msgs", []).remove(q.message.message_id)
+            except Exception:
+                pass
+            context.user_data.setdefault("flow_msgs", []).append(q.message.message_id)
+            # Startfrage-ID aufräumen, weil jetzt Flow-Nachricht
+            if context.user_data.get("prof_start_msg_id") == q.message.message_id:
+                context.user_data.pop("prof_start_msg_id", None)
+
+        return MENU_COUNT
 
     # ===== 3)  Neues Profil ===============================================
     if choice == "prof_new":
@@ -1741,7 +1883,7 @@ async def profile_new_c_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    choice = q.data  # prof_overwrite / prof_next
+    choice = q.data  # prof_overwrite / prof_back
 
     if choice == "prof_overwrite":
         # Wizard neu starten
@@ -1750,13 +1892,35 @@ async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
             pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard(),
         )
-        context.user_data["prof_msgs"].append(sent.message_id)
+        # die Profil-Übersicht wurde ge-edited → diese Message-ID ist bereits in prof_msgs
+        if sent.message_id not in context.user_data.get("prof_msgs", []):
+            context.user_data.setdefault("prof_msgs", []).append(sent.message_id)
         return PROFILE_NEW_A
 
-    # ------- Weiter → alten Menü-Flow starten -------------------------
-    await cleanup_prof_loop(context, q.message.chat_id)
-    return await start_menu_count_flow(update, context)
+    if choice == "prof_back":
+        # Profil-/Wizard-Messages löschen, aber Startfrage behalten
+        await cleanup_prof_loop_except_start(context, q.message.chat.id)
+        # Zurück zum Auswahl-State; die Startfrage steht bereits im Chat
+        return PROFILE_CHOICE
 
+    # Fallback
+    return PROFILE_OVERVIEW
+
+def build_menu_count_inline_kb(selected: int | None, page: str = "low") -> InlineKeyboardMarkup:
+    if page == "low":
+        nums = range(1, 7)
+        nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
+    else:
+        nums = range(7, 13)
+        nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
+
+    row_numbers = [
+        InlineKeyboardButton(f"{n} ✅" if selected == n else f"{n}", callback_data=f"menu_count_{n}")
+        for n in nums
+    ]
+    done_label = "✔️ Weiter" if isinstance(selected, int) else "(wähle oben)"
+    footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
+    return InlineKeyboardMarkup([row_numbers, footer])
 
 async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low"):
     """Zahlenauswahl 1–12 mit Umschaltung und 'Fertig'. Auswahl nur markieren (✅),
@@ -2175,21 +2339,7 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
     
-        if show_debug_for(update):
-            lines = []
-            for dish in menus:
-                try:
-                    raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
-                    raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
-                except Exception:
-                    raw = "<err>"
-                codes = parse_codes(raw)
-                nz = [c for c in codes if c != 0]
-                allowed = sorted(list(allowed_sides_for_dish(dish)))[:12]
-                lines.append(f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed} (n={len(allowed)})")
-            dbg = "DEBUG Beilagenvorprüfung:\n" + "\n".join(lines)
-            msg_dbg = await query.message.reply_text(dbg)
-            context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
+        await render_beilage_precheck_debug(update, context, menus, prefix="DEBUG Beilagenvorprüfung:")
 
         # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
         return await ask_beilagen_yes_no(query.message, context)
@@ -2378,24 +2528,8 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         allowed = allowed_sides_for_dish(dish)
 
         # 🔎 DEBUG Beilagen-Vorprüfung VOR der Frage anzeigen
-        if show_debug_for(update):
-            try:
-                try:
-                    raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
-                    raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
-                except Exception:
-                    raw = "<err>"
-                codes = parse_codes(raw)
-                nz = [c for c in codes if c != 0]
-                allowed_list = sorted(list(allowed))[:12]
-                dbg = (
-                    "DEBUG Beilagenvorprüfung:\n"
-                    f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed_list} (n={len(allowed_list)})"
-                )
-                msg_dbg = await q.message.reply_text(dbg)
-                context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
-            except Exception:
-                pass
+        await render_beilage_precheck_debug(update, context, dish, prefix="DEBUG Beilagenvorprüfung:")
+
 
         # Keine Beilagen möglich → direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
         if not allowed:
@@ -2493,17 +2627,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "quickone_ask_no":
         # Beilagen-Frage (diese Nachricht) entfernen
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-        except Exception:
-            pass
-        # Aus flow_msgs entfernen, falls dort gemerkt
-        flow_ids = context.user_data.get("flow_msgs", [])
-        if isinstance(flow_ids, list):
-            try:
-                flow_ids.remove(q.message.message_id)
-            except ValueError:
-                pass
+        await safe_delete_and_untrack(context, chat_id, q.message.message_id, "flow_msgs")
 
         # Direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
         return await show_final_dishes_and_ask_persons(update, context, step=2)
@@ -2511,17 +2635,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "quickone_ask_yes":
         # Beilagen-Frage (diese Nachricht) entfernen
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-        except Exception:
-            pass
-        # Aus flow_msgs entfernen, falls dort gemerkt
-        flow_ids = context.user_data.get("flow_msgs", [])
-        if isinstance(flow_ids, list):
-            try:
-                flow_ids.remove(q.message.message_id)
-            except ValueError:
-                pass
+        await safe_delete_and_untrack(context, chat_id, q.message.message_id, "flow_msgs")
 
         # QuickOne hat exakt 1 Gericht → direkt in die Beilagen-Auswahl für dieses Gericht
         dish = sessions[uid]["menues"][0]
@@ -2530,7 +2644,6 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["menu_idx"]   = 0
 
         return await ask_beilagen_for_menu(q, context)
-
 
     return ConversationHandler.END
 
@@ -2552,13 +2665,7 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "ask_yes":
         # Beilagen-Frage sofort entfernen
-        try:
-            await context.bot.delete_message(
-                chat_id=query.message.chat.id,
-                message_id=query.message.message_id
-            )
-        except Exception:
-            pass
+        await safe_delete_and_untrack(context, query.message.chat.id, query.message.message_id, "flow_msgs")
 
         menus = sessions[uid]["menues"]
         side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
@@ -2872,10 +2979,9 @@ def build_profile_overview_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 Neu anlegen", callback_data="prof_overwrite"),
-            InlineKeyboardButton("➡️ Weiter",       callback_data="prof_next"),
+            InlineKeyboardButton("🔙 Zurück",       callback_data="prof_back"),
         ]
     ])
-
 
 
 ##############################################
@@ -3402,23 +3508,7 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not side_menus:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
             
-        if show_debug_for(update):
-            lines = []
-            for dish in menus:
-                try:
-                    raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
-                    raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
-                except Exception:
-                    raw = "<err>"
-                codes = parse_codes(raw)
-                nz = [c for c in codes if c != 0]
-                allowed = sorted(list(allowed_sides_for_dish(dish)))[:12]
-                lines.append(f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed} (n={len(allowed)})")
-            dbg = "DEBUG Beilagenvorprüfung (nach Tausch):\n" + "\n".join(lines)
-            msg_dbg = await q.message.reply_text(dbg)
-            context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
-
-
+        await render_beilage_precheck_debug(update, context, menus, prefix="DEBUG Beilagenvorprüfung (nach Tausch):")
 
         return await ask_beilagen_yes_no(q.message, context)
 # CODE SCHLUSS
@@ -3522,14 +3612,6 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         _aufwand_session = {}
 
-    def _normalize_link(v: str) -> str:
-        v = (v or "").strip()
-        if not v:
-            return ""
-        if not v.startswith(("http://", "https://")):
-            v = "https://" + v
-        return v
-
     _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
 
     for g in ausgew:
@@ -3559,7 +3641,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 4) Titel: Link (falls vorhanden) + Beilagenzusatz + Aufwand-Label
         #    a) Link robust (https:// ergänzen, falls fehlt)
-        raw_link = _normalize_link(str(_link_by_dish.get(g, "") or ""))
+        raw_link = normalize_link(str(_link_by_dish.get(g, "") or ""))
 
         #    b) Haupttitel (Link außen, Bold innen: <a><b>…</b></a>)
         name_html = f"<b>{escape(g)}</b>"
