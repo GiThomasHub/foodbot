@@ -766,10 +766,16 @@ def build_selection_debug_text(menues: list[str]) -> str:
         return ""
 
     from collections import Counter
-    aufwand_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Aufwand"]).items())
-    kitchen_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Küche"]).items())
-    typ_text     = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Typ"]).items())
-    einschr_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Ernährungsstil"]).items())
+    c_aw   = Counter(sel["Aufwand"])
+    c_k    = Counter(sel["Küche"])
+    c_typ  = Counter(sel["Typ"])
+    c_erna = Counter(sel["Ernährungsstil"])
+
+    # feste Reihenfolge für Aufwand
+    aufwand_text = ", ".join(f"{c_aw.get(i,0)} x {i}" for i in (1, 2, 3))
+    kitchen_text = ", ".join(f"{v} x {k}" for k, v in c_k.items())
+    typ_text     = ", ".join(f"{v} x {k}" for k, v in c_typ.items())
+    einschr_text = ", ".join(f"{v} x {k}" for k, v in c_erna.items())
 
     lines = [
         f"📊 Aufwand-Verteilung: {aufwand_text}",
@@ -2518,7 +2524,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = q.data
 
     if data == "quickone_passt":
-        # Buttons am Vorschlag entfernen, Text "Mein Vorschlag" beibehalten
+        # Buttons am Vorschlag entfernen
         try:
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
@@ -2527,16 +2533,15 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         dish = sessions[uid]["menues"][0]
         allowed = allowed_sides_for_dish(dish)
 
-        # 🔎 DEBUG Beilagen-Vorprüfung VOR der Frage anzeigen
-        await render_beilage_precheck_debug(update, context, dish, prefix="DEBUG Beilagenvorprüfung:")
-
-
-        # Keine Beilagen möglich → direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
+        # ⚠️ WICHTIG: wie im Menü-Loop — wenn KEINE Beilagen möglich sind,
+        # KEIN Debug rendern, sondern direkt weiter.
         if not allowed:
             return await show_final_dishes_and_ask_persons(update, context, step=2)
 
-        # Beilagen möglich → separate Beilagen-Frage senden (Vorschlag bleibt sichtbar)
-        kb = InlineKeyboardMarkup([[
+        # Ab hier gibt es Beilagen → Debug jetzt (erst) anzeigen
+        await render_beilage_precheck_debug(update, context, dish, prefix="DEBUG Beilagenvorprüfung:")
+
+        kb = InlineKeyboardMarkup([[ 
             InlineKeyboardButton("Ja",   callback_data="quickone_ask_yes"),
             InlineKeyboardButton("Nein", callback_data="quickone_ask_no"),
         ]])
@@ -2546,6 +2551,7 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return QUICKONE_CONFIRM
+
 
 
 
@@ -3403,58 +3409,20 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        # 4) Vorschlagskarte ersetzen (oder Fallback neu rendern, wenn Debug fehlte)
+        # 4) Debug + Karte IMMER als Paar neu rendern → Debug garantiert darüber
         dishes = sessions[uid]["menues"]
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Passt", callback_data="swap_ok"),
-                InlineKeyboardButton("Austauschen", callback_data="swap_again"),
-            ]
-        ])
-
-        if has_debug:
-            # In-place edit der bestehenden Karte
-            title = "Neuer Vorschlag:"
-            header = f"🥣 <u><b>{title}</b></u>"
-            lines = [
-                format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
-                for g in (dishes or [])
-            ]
-            text = pad_message(f"{header}\n" + "\n".join(lines))
-
-            pid = context.user_data.get("proposal_msg_id")
-            if isinstance(pid, int):
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=q.message.chat.id,
-                        message_id=pid,
-                        text=text,
-                        reply_markup=kb
-                    )
-                except Exception:
-                    try:
-                        await context.bot.delete_message(chat_id=q.message.chat.id, message_id=pid)
-                    except Exception:
-                        pass
-                    msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
-                    context.user_data["proposal_msg_id"] = msg_new.message_id
-            else:
-                msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
-                context.user_data["proposal_msg_id"] = msg_new.message_id
-        else:
-            # Fallback: Debug oberhalb sicherstellen → Paar neu rendern
-            await render_proposal_with_debug(
-                update, context,
-                title="Neuer Vorschlag:",
-                dishes=dishes,
-                buttons=[
-                    [InlineKeyboardButton("Passt", callback_data="swap_ok"),
-                     InlineKeyboardButton("Austauschen", callback_data="swap_again")]
-                ],
-                replace_old=True
-            )
-
+        await render_proposal_with_debug(
+            update, context,
+            title="Neuer Vorschlag:",
+            dishes=dishes,
+            buttons=[
+                [InlineKeyboardButton("Passt", callback_data="swap_ok"),
+                 InlineKeyboardButton("Austauschen", callback_data="swap_again")]
+            ],
+            replace_old=True
+        )
         return TAUSCHE_CONFIRM
+
 
 
 
@@ -4990,7 +4958,7 @@ def main():
             CallbackQueryHandler(menu_start_cb, pattern="^restart_menu$")
         ],
         states={
-            PROFILE_CHOICE: [CallbackQueryHandler(profile_choice_cb, pattern=r"^prof_(?:exist|new|nolim)$")],
+            PROFILE_CHOICE: [CallbackQueryHandler(profile_choice_cb, pattern=r"^prof_(?:exist|nolim|new|show)$")],
             PROFILE_NEW_A: [CallbackQueryHandler(profile_new_a_cb, pattern="^res_")],
             PROFILE_NEW_B: [CallbackQueryHandler(profile_new_b_cb, pattern="^style_")],
             PROFILE_NEW_C: [CallbackQueryHandler(profile_new_c_cb, pattern="^weight_")],
@@ -5027,7 +4995,7 @@ def main():
             ],
             FAV_ADD_SELECT: [
                         CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"),
-                        CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"),
+                        CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"),
                         CallbackQueryHandler(fav_selection_toggle_cb,   pattern=r"^fav_sel_\d+$"),
                         CallbackQueryHandler(fav_selection_done_cb,     pattern="^fav_sel_done$")
             ],
@@ -5103,7 +5071,7 @@ def main():
             # neu: Favoriten hinzufügen-Loop
             FAV_ADD_SELECT: [
                 CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"),
-                CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"),
+                CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"),
                 CallbackQueryHandler(fav_selection_toggle_cb,  pattern=r"^fav_sel_\d+$"),
                 CallbackQueryHandler(fav_selection_done_cb,    pattern="^fav_sel_done$"),
                 CallbackQueryHandler(fav_del_number_toggle_cb, pattern=r"^fav_del_\d+$"), 
