@@ -3162,13 +3162,13 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3) 'Weiter' mit Auswahl → alten Vorschlag + Tauschfrage löschen, neuen Vorschlag senden
     if data == "swap_done":
-        # 1) Profil-hard filter + Basis-DataFrame
-        profile  = profiles.get(uid)
+        # 1) Profil / Basis
+        profile = profiles.get(uid)
         basis_df = apply_profile_filters(df_gerichte, profile)
 
         sessions[uid].setdefault("beilagen", {})
-        menues   = sessions[uid]["menues"]
-        aufw     = sessions[uid]["aufwand"]
+        menues = sessions[uid]["menues"]
+        aufw = sessions[uid]["aufwand"]
         swap_history = sessions[uid].setdefault("swap_history", {1: [], 2: [], 3: []})
         if all(len(v) == 0 for v in swap_history.values()):
             for dish, lvl in zip(menues, aufw):
@@ -3176,11 +3176,11 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         swapped_slots: list[int] = []
         for idx in sorted(sel):
-            slot          = idx - 1
-            current_dish  = menues[slot]
-            current_aufw  = aufw[slot]
-            row_cur       = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
-            current_art   = ART_ORDER.get(row_cur["Typ"], 2)
+            slot = idx - 1
+            current_dish = menues[slot]
+            current_aufw = aufw[slot]
+            row_cur = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
+            current_art = ART_ORDER.get(row_cur["Typ"], 2)
 
             other_sel = set(menues) - {current_dish}
             cands = set(
@@ -3210,15 +3210,15 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             scored = []
             for cand in pool:
-                row_c    = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
-                cand_aw  = int(row_c["Aufwand"])
+                row_c = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
+                cand_aw = int(row_c["Aufwand"])
                 cand_art = ART_ORDER.get(row_c["Typ"], 2)
-                d_aw     = abs(current_aufw - cand_aw)
-                d_art    = abs(current_art   - cand_art)
+                d_aw = abs(current_aufw - cand_aw)
+                d_art = abs(current_art - cand_art)
                 scored.append((cand, (d_aw, d_art)))
 
             min_score = min(score for _, score in scored)
-            best      = [c for c, score in scored if score == min_score]
+            best = [c for c, score in scored if score == min_score]
 
             def _aktiv_weight(name: str) -> float:
                 row = df_gerichte[df_gerichte["Gericht"] == name].iloc[0]
@@ -3241,7 +3241,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         persist_session(update)
         context.user_data["swapped_indices"] = swapped_slots
 
-        # ❌ Nur die Tauschfrage-Nachricht löschen (Buttons + Text)
+        # 2) Tauschfrage (diese Nachricht) entfernen + aus flow_msgs austragen
         try:
             await context.bot.delete_message(
                 chat_id=q.message.chat.id,
@@ -3249,7 +3249,6 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-        # aus flow_msgs austragen, falls dort gemerkt
         flow_ids = context.user_data.get("flow_msgs", [])
         if isinstance(flow_ids, list):
             try:
@@ -3257,7 +3256,7 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
 
-        # 🟩 Verteilungs-Debug IN-PLACE aktualisieren (steht oberhalb der Karte)
+        # 3) Verteilungs-DEBUG in-place aktualisieren (oberhalb der Karte)
         if show_debug_for(update):
             try:
                 dbg_txt = build_selection_debug_text(sessions[uid]["menues"])
@@ -3266,20 +3265,45 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        # 🟩 Vorschlagskarte IN-PLACE zu „Neuer Vorschlag“ editieren
-        await edit_proposal_card(
-            update,
-            context,
-            title="Neuer Vorschlag:",
-            dishes=menues,
-            buttons=[
-                [
-                    InlineKeyboardButton("Passt", callback_data="swap_ok"),
-                    InlineKeyboardButton("Austauschen", callback_data="swap_again"),
-                ]
-            ],
-        )
+        # 4) Vorschlagskarte IN-PLACE auf "Neuer Vorschlag:" ersetzen (Text + Buttons)
+        title = "Neuer Vorschlag:"
+        dishes = sessions[uid]["menues"]
+        header = f"🥣 <u><b>{title}</b></u>"
+        lines = [
+            format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
+            for g in (dishes or [])
+        ]
+        text = pad_message(f"{header}\n" + "\n".join(lines))
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Passt", callback_data="swap_ok"),
+                InlineKeyboardButton("Austauschen", callback_data="swap_again"),
+            ]
+        ])
+
+        pid = context.user_data.get("proposal_msg_id")
+        if isinstance(pid, int):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=q.message.chat.id,
+                    message_id=pid,
+                    text=text,
+                    reply_markup=kb
+                )
+            except Exception:
+                # Fallback: alte Karte weg, neu senden
+                try:
+                    await context.bot.delete_message(chat_id=q.message.chat.id, message_id=pid)
+                except Exception:
+                    pass
+                msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
+                context.user_data["proposal_msg_id"] = msg_new.message_id
+        else:
+            msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
+            context.user_data["proposal_msg_id"] = msg_new.message_id
+
         return TAUSCHE_CONFIRM
+
 
 
 
