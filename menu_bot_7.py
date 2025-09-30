@@ -1883,7 +1883,7 @@ async def profile_new_c_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    choice = q.data  # prof_overwrite / prof_back
+    choice = q.data  # 'prof_overwrite' oder 'prof_back'
 
     if choice == "prof_overwrite":
         # Wizard neu starten
@@ -1892,19 +1892,19 @@ async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
             pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard(),
         )
-        # die Profil-Übersicht wurde ge-edited → diese Message-ID ist bereits in prof_msgs
         if sent.message_id not in context.user_data.get("prof_msgs", []):
             context.user_data.setdefault("prof_msgs", []).append(sent.message_id)
         return PROFILE_NEW_A
 
     if choice == "prof_back":
-        # Profil-/Wizard-Messages löschen, aber Startfrage behalten
+        # Alle Profil-/Wizard-Nachrichten löschen, aber die Startfrage stehen lassen
         await cleanup_prof_loop_except_start(context, q.message.chat.id)
-        # Zurück zum Auswahl-State; die Startfrage steht bereits im Chat
+        # Zurück in den Auswahl-State; die (bestehende) Startfrage bleibt sichtbar/benutzbar
         return PROFILE_CHOICE
 
-    # Fallback
+    # Fallback (sollte nie erreicht werden)
     return PROFILE_OVERVIEW
+
 
 def build_menu_count_inline_kb(selected: int | None, page: str = "low") -> InlineKeyboardMarkup:
     if page == "low":
@@ -4990,11 +4990,11 @@ def main():
             CallbackQueryHandler(menu_start_cb, pattern="^restart_menu$")
         ],
         states={
-            PROFILE_CHOICE: [CallbackQueryHandler(profile_choice_cb, pattern="^prof_")],
+            PROFILE_CHOICE: [CallbackQueryHandler(profile_choice_cb, pattern=r"^prof_(?:exist|new|nolim)$")],
             PROFILE_NEW_A: [CallbackQueryHandler(profile_new_a_cb, pattern="^res_")],
             PROFILE_NEW_B: [CallbackQueryHandler(profile_new_b_cb, pattern="^style_")],
             PROFILE_NEW_C: [CallbackQueryHandler(profile_new_c_cb, pattern="^weight_")],
-            PROFILE_OVERVIEW: [CallbackQueryHandler(profile_overview_cb, pattern="^prof_(over|next)")],
+            PROFILE_OVERVIEW: [CallbackQueryHandler(profile_overview_cb, pattern=r"^prof_(?:overwrite|back)$")],
             MENU_INPUT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_input)],
             ASK_CONFIRM:   [CallbackQueryHandler(menu_confirm_cb, pattern="^confirm_")],
             ASK_BEILAGEN:  [CallbackQueryHandler(ask_beilagen_cb)],
