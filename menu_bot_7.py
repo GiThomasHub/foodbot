@@ -690,12 +690,13 @@ def build_selection_debug_text(menues: list[str]) -> str:
     typ_text     = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Typ"]).items())
     einschr_text = ", ".join(f"{v} x {k}" for k, v in Counter(sel["Ernährungsstil"]).items())
 
-    return (
-        f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-        f"\n🎨 Küche-Verteilung: {kitchen_text}"
-        f"\n⚙️ Typ-Verteilung: {typ_text}"
-        f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
-    )
+    lines = [
+        f"📊 Aufwand-Verteilung: {aufwand_text}",
+        f"🎨 Küche-Verteilung: {kitchen_text}",
+        f"⚙️ Typ-Verteilung: {typ_text}",
+        f"🥗 Ernährungsstil-Verteilung: {einschr_text}",
+    ]
+    return "\n".join(lines)
 
 
 # NEW: track IDs von Nachrichten, die wir beim Neustart gezielt löschen wollen
@@ -2455,10 +2456,80 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
     if data == "quickone_neu":
-        # 🧹 Zuerst alte Vorschlagskarte entfernen, dann nur Flow-UI säubern
-        await delete_proposal_card(context, chat_id)
-        await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
-        return await quickone_start(update, context)
+        # Keinen kompletten Neustart; ersetze die bestehende Vorschlagskarte in-place
+        remaining = context.user_data.get("quickone_remaining")
+        all_dishes = [d for d in df_gerichte["Gericht"].tolist() if isinstance(d, str) and d.strip()]
+
+        if remaining is None:
+            remaining = all_dishes.copy()
+
+        if not remaining:
+            try:
+                await q.answer("Keine neuen Gerichte mehr im aktuellen Durchgang. Bitte »🔄 Restart«.", show_alert=True)
+            except Exception:
+                pass
+            return QUICKONE_CONFIRM
+
+        # Favoriten (3x) × Aktiv-Gewicht
+        user_favs = favorites.get(uid, [])
+        wmap = df_gerichte.set_index("Gericht")["Gewicht"].to_dict()
+        weights = [(3 if d in user_favs else 1) * float(wmap.get(d, 1.0)) for d in remaining]
+
+        dish = random.choices(remaining, weights=weights, k=1)[0]
+        try:
+            remaining.remove(dish)
+        except ValueError:
+            pass
+        context.user_data["quickone_remaining"] = remaining
+
+        # Session aktualisieren (ein Gericht)
+        sessions[uid] = {
+            "menues": [dish],
+            "aufwand": [int(df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].iloc[0]) if not df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].empty else 0],
+            "beilagen": {}
+        }
+        persist_session(update)
+
+        # Aufwand-Label
+        try:
+            lvl = sessions[uid]["aufwand"][0]
+        except Exception:
+            lvl = get_aufwand_for(dish)
+        label_txt = effort_label(lvl)
+        aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
+
+        # Text der bestehenden Vorschlagskarte ersetzen
+        title = "Neuer Vorschlag:"
+        text = pad_message(f"🥣 <u><b>{title}</b></u>\n\n{escape(dish)} {aufwand_label}")
+
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✔️ Passt", callback_data="quickone_passt"),
+            InlineKeyboardButton("🔁 Neu",   callback_data="quickone_neu"),
+        ]])
+
+        pid = context.user_data.get("proposal_msg_id")
+        if isinstance(pid, int):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=pid,
+                    text=text,
+                    reply_markup=kb
+                )
+            except Exception:
+                # Fallback: wenn Edit scheitert, Karte neu senden und ID aktualisieren
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+                except Exception:
+                    pass
+                msg_new = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+                context.user_data["proposal_msg_id"] = msg_new.message_id
+        else:
+            msg_new = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            context.user_data["proposal_msg_id"] = msg_new.message_id
+
+        return QUICKONE_CONFIRM
+
 
     if data == "quickone_ask_no":
         # Beilagen-Frage (diese Nachricht) entfernen
@@ -3256,8 +3327,9 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except ValueError:
                 pass
 
-        # 3) Verteilungs-DEBUG in-place aktualisieren (oberhalb der Karte)
-        if show_debug_for(update):
+        # 3) Debug aktualisieren; falls Debug-Message fehlt, sicherer Fallback über Neu-Render
+        has_debug = isinstance(context.user_data.get("dist_debug_msg_id"), int)
+        if has_debug and show_debug_for(update):
             try:
                 dbg_txt = build_selection_debug_text(sessions[uid]["menues"])
                 if dbg_txt:
@@ -3265,15 +3337,8 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        # 4) Vorschlagskarte IN-PLACE auf "Neuer Vorschlag:" ersetzen (Text + Buttons)
-        title = "Neuer Vorschlag:"
+        # 4) Vorschlagskarte ersetzen (oder Fallback neu rendern, wenn Debug fehlte)
         dishes = sessions[uid]["menues"]
-        header = f"🥣 <u><b>{title}</b></u>"
-        lines = [
-            format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
-            for g in (dishes or [])
-        ]
-        text = pad_message(f"{header}\n" + "\n".join(lines))
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("Passt", callback_data="swap_ok"),
@@ -3281,28 +3346,50 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ])
 
-        pid = context.user_data.get("proposal_msg_id")
-        if isinstance(pid, int):
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=q.message.chat.id,
-                    message_id=pid,
-                    text=text,
-                    reply_markup=kb
-                )
-            except Exception:
-                # Fallback: alte Karte weg, neu senden
+        if has_debug:
+            # In-place edit der bestehenden Karte
+            title = "Neuer Vorschlag:"
+            header = f"🥣 <u><b>{title}</b></u>"
+            lines = [
+                format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
+                for g in (dishes or [])
+            ]
+            text = pad_message(f"{header}\n" + "\n".join(lines))
+
+            pid = context.user_data.get("proposal_msg_id")
+            if isinstance(pid, int):
                 try:
-                    await context.bot.delete_message(chat_id=q.message.chat.id, message_id=pid)
+                    await context.bot.edit_message_text(
+                        chat_id=q.message.chat.id,
+                        message_id=pid,
+                        text=text,
+                        reply_markup=kb
+                    )
                 except Exception:
-                    pass
+                    try:
+                        await context.bot.delete_message(chat_id=q.message.chat.id, message_id=pid)
+                    except Exception:
+                        pass
+                    msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
+                    context.user_data["proposal_msg_id"] = msg_new.message_id
+            else:
                 msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
                 context.user_data["proposal_msg_id"] = msg_new.message_id
         else:
-            msg_new = await context.bot.send_message(chat_id=q.message.chat.id, text=text, reply_markup=kb)
-            context.user_data["proposal_msg_id"] = msg_new.message_id
+            # Fallback: Debug oberhalb sicherstellen → Paar neu rendern
+            await render_proposal_with_debug(
+                update, context,
+                title="Neuer Vorschlag:",
+                dishes=dishes,
+                buttons=[
+                    [InlineKeyboardButton("Passt", callback_data="swap_ok"),
+                     InlineKeyboardButton("Austauschen", callback_data="swap_again")]
+                ],
+                replace_old=True
+            )
 
         return TAUSCHE_CONFIRM
+
 
 
 
