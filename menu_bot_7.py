@@ -796,19 +796,6 @@ def normalize_link(v: str) -> str:
     return v if v.startswith(("http://","https://")) else "https://" + v
 
 
-async def delete_last_flow_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, list_key: str = "flow_msgs") -> None:
-    """
-    Löscht nur die letzte getrackte Flow-Nachricht aus context.user_data[list_key].
-    Nutzt try/except, damit alte/gelöschte Nachrichten kein Problem sind.
-    """
-    flow = context.user_data.get(list_key, [])
-    if flow:
-        last_id = flow.pop()
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-        except Exception:
-            pass
-
 async def reset_flow_state(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1013,18 +1000,6 @@ def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per
 def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
     """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Zurück'/'✔️ Fertig'."""
     return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=7, done_cb="fav_del_done", done_label_empty="Zurück",done_label_some="✔️ Fertig")
-
-def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 7 pro Zeile) für Hinzufügen-Modus + 'Fertig'."""
-    return _build_numbers_keyboard(
-        prefix="fav_add_",
-        total=total,
-        selected=selected,
-        max_per_row=7,
-        done_cb="fav_add_done",
-        done_label_empty="Keines",      # <- leer: "Keines"
-        done_label_some="✔️ Fertig",    # <- mit Auswahl: "✔️ Fertig"
-    )
 
 
 # NEW — Text abkürzen (ASCII-„...“), feste maximale Länge
@@ -1287,13 +1262,6 @@ def gi(name: str):
     except Exception:
         return None
 
-def get_beilagen_codes_for(dish: str) -> list[int]:
-    """Beilagen-Codes eines Gerichts als Liste[int], robust und schnell."""
-    row = gi(dish)
-    if not row:
-        return []
-    s = str(row.get("Beilagen") or "").strip()
-    return parse_codes(s) if s else []
 
 def get_aufwand_for(dish: str):
     """Aufwand eines Gerichts als int (1/2/3) oder None."""
@@ -1304,11 +1272,6 @@ def get_aufwand_for(dish: str):
         return int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
     except Exception:
         return None
-
-def get_link_for(dish: str) -> str:
-    """Optionale Link-URL eines Gerichts, getrimmt (oder '')."""
-    row = gi(dish)
-    return str(row.get("Link") or "").strip() if row else ""
 
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
@@ -1428,9 +1391,6 @@ def sample_by_weight(df: pd.DataFrame, weight: int, k: int) -> pd.DataFrame:
     result = pd.concat(list(chosen.values()))
     return result.sample(frac=1).reset_index(drop=True)
 
-def choose_random_dish() -> str:
-    """Zufällig ein Gericht auswählen, ohne Filter."""
-    return df_gerichte.sample(1)["Gericht"].iloc[0]
 
 def choose_sides(codes: list[int]) -> list[int]:
     """Beilagen basierend auf Codes zufällig auswählen, ohne Fehler bei leeren Kategorien."""
