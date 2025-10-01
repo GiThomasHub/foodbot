@@ -4048,7 +4048,18 @@ async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     return ConversationHandler.END
 
-
+async def restart_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Globaler /restart: zeigt wie bei den Buttons eine Bestätigungsfrage an."""
+    chat_id = update.effective_chat.id
+    text = pad_message("🔄 Bist Du sicher?")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ja",   callback_data="restart_yes"),
+         InlineKeyboardButton("Nein", callback_data="restart_no")]
+    ])
+    confirm = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    # wichtig: ID merken – wird von restart_confirm_cb genutzt
+    context.user_data["restart_confirm_msg_id"] = confirm.message_id
+    return RESTART_CONFIRM
 
 
 async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -4218,6 +4229,9 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # data == 'restart_no_ov'
     return ConversationHandler.END
+
+
+
 
 async def restart_cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Globaler /restart: sofort neu starten (ohne Rückfrage), überall wirksam."""
@@ -5005,13 +5019,15 @@ def main():
     print("BUILD_MARK = FIX_WEBHOOK_", __import__("datetime").datetime.utcnow().isoformat())
     app = ApplicationBuilder().token(TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML, disable_web_page_preview=True)).build()
     
-    # --- GLOBAL PRIORITY HANDLERS (müssen immer funktionieren) ---
-    # Buttons „🔄 Restart“ aus der Übersicht:
-    app.add_handler(CallbackQueryHandler(restart_start_ov,  pattern="^restart_ov$", block=True), group=0)
-    app.add_handler(CallbackQueryHandler(restart_confirm_ov, pattern="^restart_(?:yes_ov|no_ov)$", block=True), group=0)
+    # --- GLOBAL PRIORITY HANDLERS (immer zuerst) ---
+    # Übersicht-Button "🔄 Restart" (Callback-Flow):
+    app.add_handler(CallbackQueryHandler(restart_start_ov,   pattern="^restart_ov$",                        block=True), group=0)
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov, pattern="^restart_(?:yes_ov|no_ov)$",          block=True), group=0)
 
-    # Slash-Befehle überall: /restart und /status (case-insensitive via Alias)
-    app.add_handler(CommandHandler(["restart", "Restart"], restart_cmd_global, block=True), group=0)
+    # Slash-/restart mit Bestätigungsfrage + deren Antwort (Callback-Flow wiederverwenden):
+    app.add_handler(CommandHandler(["restart","Restart"], restart_cmd_start,                                 block=True), group=0)
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb, pattern="^restart_(?:yes|no)$",                 block=True), group=0)
+
     app.add_handler(CommandHandler(["status",  "Status"],  status,             block=True), group=0)
 
     cancel_handler = CommandHandler("cancel", cancel)
