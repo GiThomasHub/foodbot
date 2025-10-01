@@ -768,13 +768,13 @@ def build_selection_debug_text(menues: list[str]) -> str:
     from collections import Counter
     c_aw   = Counter(sel["Aufwand"])
     c_k    = Counter(sel["Küche"])
-    c_typ  = Counter(sel["Typ"])
+    c_typ  = Counter(int(pd.to_numeric(t, errors="coerce")) for t in sel["Typ"])
     c_erna = Counter(sel["Ernährungsstil"])
 
     # feste Reihenfolge für Aufwand
     aufwand_text = ", ".join(f"{c_aw.get(i,0)} x {i}" for i in (1, 2, 3))
     kitchen_text = ", ".join(f"{v} x {k}" for k, v in c_k.items())
-    typ_text     = ", ".join(f"{v} x {k}" for k, v in c_typ.items())
+    typ_text     = ", ".join(f"{c_typ.get(i,0)} x {i}" for i in (1, 2, 3))
     einschr_text = ", ".join(f"{v} x {k}" for k, v in c_erna.items())
 
     lines = [
@@ -1174,7 +1174,7 @@ def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based:
         label = ("✅ " if (i - 1) in selected_zero_based else "") + label_base
         rows.append([InlineKeyboardButton(label, callback_data=f"select_{i}")])
 
-    footer_label = "✔️ Fertig" if selected_zero_based else "keine Beilagen"
+    footer_label = "✔️ Weiter" if selected_zero_based else "Keine Beilagen"
     rows.append([InlineKeyboardButton(footer_label, callback_data="select_done")])
     return InlineKeyboardMarkup(rows)
 
@@ -1769,7 +1769,7 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_and_log("Es besteht noch kein Profil. Erstelle eines!")
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
-            "Ernährungsstil:",
+            pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard()
         )
         return PROFILE_NEW_A
@@ -1811,7 +1811,7 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if choice == "prof_new":
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
-            "Ernährungsstil:",
+            pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard()
         )
         return PROFILE_NEW_A
@@ -1829,7 +1829,7 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_and_log("Es besteht noch kein Profil. Erstelle eines!")
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
-            "Ernährungsstil:",
+            pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard()
         )
         return PROFILE_NEW_A
@@ -1847,7 +1847,7 @@ async def profile_new_a_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # weiter zu (b)
     await q.message.edit_text(
-        pad_message("Küche auswählen (Mehrfachauswahl möglich):"),
+        pad_message("Küche auswählen (Mehrfachauswahl möglich oder 'Alles'):"),
         reply_markup=build_style_keyboard(set())
     )
     return PROFILE_NEW_B
@@ -2946,6 +2946,7 @@ def build_style_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
 
     # Label für »Alles«: Haken nur, wenn wirklich alle Stile gewählt
     label_all = "✅ Alles" if selected == ALL_STYLE_KEYS else "Alles"
+    done_label = "✔️ Fertig" if selected else "(wähle oben)"
 
     rows = [
         [
@@ -2960,9 +2961,7 @@ def build_style_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(label("style_orient",        "Orientalisch"),  callback_data="style_orient"),
             InlineKeyboardButton(label_all,                   callback_data="style_all"),
         ],
-        [
-            InlineKeyboardButton("✔️ Fertig", callback_data="style_done"),
-        ],
+        [ InlineKeyboardButton(done_label, callback_data="style_done") ]
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -4147,8 +4146,6 @@ async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-
-
 async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Bestätigung für '🔄 Restart' aus der Übersicht."""
     q = update.callback_query
@@ -4222,6 +4219,48 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # data == 'restart_no_ov'
     return ConversationHandler.END
 
+async def restart_cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Globaler /restart: sofort neu starten (ohne Rückfrage), überall wirksam."""
+    chat_id = update.effective_chat.id
+    uid     = str(update.effective_user.id)
+
+    # 1) Aktions-/Export-Nachrichten entfernen
+    for mid in context.user_data.get("export_msgs", []):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    context.user_data["export_msgs"] = []
+
+    # 2) Vorschlagskarte gezielt entfernen
+    await delete_proposal_card(context, chat_id)
+
+    # 3) Alle bekannten UI-Listen leeren
+    for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]:
+        ids = context.user_data.get(key, [])
+        for mid in ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data[key] = []
+    for key in ["proposal_msg_id", "final_list_msg_id"]:
+        context.user_data.pop(key, None)
+
+    # 4) Session & QuickOne-Pool zurücksetzen
+    if uid in sessions:
+        del sessions[uid]
+    try:
+        ckey = chat_key(int(update.effective_chat.id))
+        store_delete_session(ckey)
+    except Exception:
+        pass
+    context.user_data.pop("quickone_remaining", None)
+
+    # 5) Neustart-Banner + Übersicht
+    banner = build_new_run_banner()
+    await context.bot.send_message(chat_id, pad_message(banner))
+    await send_overview(chat_id, context)
 
 
 
@@ -4965,12 +5004,22 @@ Anleitung (kurz Schritt-für-Schritt):"""
 def main():
     print("BUILD_MARK = FIX_WEBHOOK_", __import__("datetime").datetime.utcnow().isoformat())
     app = ApplicationBuilder().token(TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML, disable_web_page_preview=True)).build()
+    
+    # --- GLOBAL PRIORITY HANDLERS (müssen immer funktionieren) ---
+    # Buttons „🔄 Restart“ aus der Übersicht:
+    app.add_handler(CallbackQueryHandler(restart_start_ov,  pattern="^restart_ov$", block=True), group=0)
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov, pattern="^restart_(?:yes_ov|no_ov)$", block=True), group=0)
+
+    # Slash-Befehle überall: /restart und /status (case-insensitive via Alias)
+    app.add_handler(CommandHandler(["restart", "Restart"], restart_cmd_global, block=True), group=0)
+    app.add_handler(CommandHandler(["status",  "Status"],  status,             block=True), group=0)
+
     cancel_handler = CommandHandler("cancel", cancel)
     reset_handler  = CommandHandler("reset", reset_command)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setup", setup))
     app.add_handler(CommandHandler("tausche", tausche, filters=filters.Regex(r"^\s*/tausche\s+\d"), block=True))
-    app.add_handler(CommandHandler("status", status))
+    #app.add_handler(CommandHandler("status", status)) brauchts nicht mehr, ist schon oben drin
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("favorit", favorit))
     #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
