@@ -686,27 +686,8 @@ async def upsert_distribution_debug(update: Update, context: ContextTypes.DEFAUL
     context.user_data[key] = msg.message_id
     return msg.message_id
 
-async def render_proposal_with_debug(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    title: str,
-    dishes: list[str],
-    buttons: list[list[InlineKeyboardButton]],
-    replace_old: bool = True,
-) -> int:
-    """
-    Löscht optional das alte Paar (Debug + Vorschlag), sendet dann das Debug
-    SCHÖN OBERHALB der Karte und direkt darunter die Vorschlagskarte.
-    Rückgabe: message_id der Vorschlagskarte.
-    """
-    chat_id = update.effective_chat.id
-
-    # 1) Altes Paar (Debug + Karte) wegräumen
-    if replace_old:
-        await delete_proposal_card(context, chat_id)
-
-    # 2) Debug OBEN drüber, falls Admin
+async def render_proposal_with_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, *, title: str, dishes: list[str], buttons: list[list[InlineKeyboardButton]], replace_old: bool = True,) -> int:
+    # 1) Debug in-place updaten (nur Admins sehen ihn)
     if show_debug_for(update):
         try:
             dbg_txt = build_selection_debug_text(dishes)
@@ -715,14 +696,12 @@ async def render_proposal_with_debug(
         except Exception:
             pass
 
-    # 3) Karte direkt darunter senden (jetzt NICHTS mehr löschen)
-    return await send_proposal_card(
-        update, context,
-        title=title,
-        dishes=dishes,
-        buttons=buttons,
-        replace_old=False
+    # 2) Vorschlagskarte in-place updaten
+    return await upsert_proposal_card(
+        update, context, title=title, dishes=dishes, buttons=buttons
     )
+
+
 
 
 def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4, wrap_at: int = 60) -> str:
@@ -848,6 +827,34 @@ async def send_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
     msg = await context.bot.send_message(chat_id, pad_message(f"{header}\n{body}"), reply_markup=kb)
     context.user_data["proposal_msg_id"] = msg.message_id
     return msg.message_id
+
+async def upsert_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE, *, title: str, dishes: list[str], buttons: list[list[InlineKeyboardButton]] | None = None,) -> int:
+    """Ersetzt die bestehende Vorschlagskarte in-place; sendet neu, falls keine existiert."""
+    chat_id = update.effective_chat.id
+    pid = context.user_data.get("proposal_msg_id")
+
+    header = f"🥣 <u><b>{title}</b></u>"
+    lines = [format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
+             for g in (dishes or [])]
+    text = pad_message(f"{header}\n" + "\n".join(lines))
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if isinstance(pid, int):
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=pid, text=text, reply_markup=kb)
+            return pid
+        except Exception:
+            # Fallback: alte Karte weg und neu senden
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+            except Exception:
+                pass
+
+    msg = await context.bot.send_message(chat_id, text, reply_markup=kb)
+    context.user_data["proposal_msg_id"] = msg.message_id
+    return msg.message_id
+
+
 
 async def ask_beilagen_yes_no(anchor_msg, context: ContextTypes.DEFAULT_TYPE) -> int:
     kb = InlineKeyboardMarkup([
@@ -5019,9 +5026,7 @@ def main():
     app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
     app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
-    #app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))    am 23/9 gelöscht
-
-
+    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"))
 
 
     #### ---- QuickOne-Conversation ----
