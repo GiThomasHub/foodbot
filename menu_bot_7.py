@@ -332,6 +332,53 @@ def format_amount(q):
     # Sonst normalize, um überflüssige Nullen zu entfernen
     return format(qd2.normalize(), 'f')
 
+# NEW — Mengen-/Einheiten-Normalisierung (g↔kg, ml↔dl↔l)
+def normalize_quantity(amount, unit):
+    """
+    Normalisiert numerische Mengen inkl. Einheiten.
+    Regeln:
+      - g:  >= 1000 → kg
+      - ml: >= 1000 → l, sonst >= 100 → dl
+      - dl: >= 10   → l
+    Alle anderen Einheiten bleiben unverändert.
+    Rückgabe: (amount, unit)
+    """
+    try:
+        a = float(amount)
+    except Exception:
+        return amount, unit
+
+    u_raw = (unit or "").strip()
+    u = u_raw.lower()
+
+    # Gramm → Kilogramm
+    if u in ("g", "gramm", "gr"):
+        if a >= 1000:
+            return a / 1000.0, "kg"
+        return a, "g"
+
+    # Milliliter → Deziliter/Liter
+    if u in ("ml", "milliliter"):
+        if a >= 1000:
+            return a / 1000.0, "l"
+        if a >= 100:
+            return a / 100.0, "dl"
+        return a, "ml"
+
+    # Deziliter → Liter
+    if u in ("dl", "deziliter"):
+        if a >= 10:
+            return a / 10.0, "l"
+        return a, "dl"
+
+    # Liter bleibt Liter
+    if u in ("l", "liter"):
+        return a, "l"
+
+    # Unbekannt/andere Einheiten: nichts ändern
+    return a, u_raw
+
+
 def dishes_header(count: int, step: int | None = None) -> str:
     """
     Baut den Titel für die Gerichte-Liste.
@@ -3590,8 +3637,9 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt = raw or "wenig"
                 line = f"‣ {r.Zutat}: {txt}"
             else:
-                amt  = format_amount(r.Menge)
-                line = f"‣ {r.Zutat}: {amt} {r.Einheit}"
+                amt2, unit2 = normalize_quantity(float(r["Menge"]), str(r["Einheit"]))
+                amt = format_amount(amt2)
+                line = f"‣ {r['Zutat']}: {amt} {unit2}"
             eink_text += f"{line}\n"
 
     # --- Kochliste mit Hauptgericht- und Beilagen-Zutaten in der richtigen Reihenfolge ---
@@ -3630,8 +3678,10 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt = raw or "wenig"
                 ze_parts.append(f"{row['Zutat']} {txt}")
             else:
-                amt = format_amount(row["Menge"])
-                ze_parts.append(f"{row['Zutat']} {amt} {row['Einheit']}")
+                amt2, unit2 = normalize_quantity(float(row["Menge"]), str(row["Einheit"]))
+                amt = format_amount(amt2)
+                ze_parts.append(f"{row['Zutat']} {amt} {unit2}")
+
         ze_html = escape(", ".join(ze_parts))
 
         # 4) Titel: Link (falls vorhanden) + Beilagenzusatz + Aufwand-Label
@@ -3715,10 +3765,16 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         .assign(Kategorie=lambda d: d["Kategorie"].fillna("Sonstiges"))
         .sort_values(["Kategorie", "Zutat"], kind="mergesort")
     )
-    recipe_ingredients = [
-        (f"{format_amount(r.Menge)} {r.Einheit} {r.Zutat}").strip()
-        for _, r in eink_sorted.iterrows()
-    ]
+    recipe_ingredients = []
+    for _, r in eink_sorted.iterrows():
+        raw = str(r["Menge_raw"]).strip()
+        if raw and not raw.replace(".", "").isdigit():
+            # Freitext-Menge (z. B. "1 Dose")
+            recipe_ingredients.append(f"{raw} {r['Zutat']}".strip())
+        else:
+            amt2, unit2 = normalize_quantity(float(r["Menge"]), str(r["Einheit"]))
+            recipe_ingredients.append(f"{format_amount(amt2)} {unit2} {r['Zutat']}".strip())
+
     recipe_jsonld = {
         "@context": "https://schema.org",
         "@type":    "Recipe",
