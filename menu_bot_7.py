@@ -1662,7 +1662,19 @@ async def send_welcome_then_overview(update: Update, context: ContextTypes.DEFAU
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_welcome_then_overview(update, context)
 
-
+async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🛠 <u>Übersicht der Funktionen:</u>\n"
+        #"/start – Hilfe & Einführung\n"
+        #"/menu – generiere Gerichtevorschläge\n"
+        #"/meinefavoriten – Übersicht deiner Favoriten\n"
+        #"/meinProfil – Übersicht Deiner Favoriten\n"
+        "/status – zeigt aktuelle Gerichtewahl\n"
+        "/reset – setzt Session zurück (Favoriten bleiben)\n"
+        "/setup – zeigt alle Funktionen\n"
+        #"/neustart – Startet neuen Prozess (Favoriten bleiben)\n"
+        f"\nDeine User-ID: {update.effective_user.id}"
+    )
 
 async def menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/menu per Text – startet Profil-Loop"""
@@ -1718,24 +1730,6 @@ async def start_setup_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("Alles klar", callback_data="setup_ack")
         ]])
     )
-
-async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🛠 Kommandos im Menu Bot:\n"
-        "/start – Hilfe & Einführung\n"
-        "/menu – generiere Gerichtevorschläge\n"
-        "/meinefavoriten – Übersicht Deiner Favoriten\n"
-        "/status – zeigt aktuelle Auswahl\n"
-        "/reset – alles löschen (mit Bestätigung)\n"
-        "/setup – zeigt alle Kommandos\n"
-        "/neustart – neuer Prozess\n"
-        f"\nDeine User-ID: {update.effective_user.id}"
-    )
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Alles klar", callback_data="setup_ack")]])
-    )
-
 
 async def setup_ack_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Löscht die Setup-Übersicht, wenn auf ‚Alles klar‘ geklickt wird."""
@@ -4293,6 +4287,8 @@ async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
+
+
 async def restart_cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Globaler /restart: sofort neu starten (ohne Rückfrage), überall wirksam."""
     chat_id = update.effective_chat.id
@@ -4336,133 +4332,6 @@ async def restart_cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(chat_id, pad_message(banner))
     await send_overview(chat_id, context)
 
-# === /reset: Bestätigung zeigen ===
-async def reset_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Zeigt eine Bestätigungsfrage für komplettes Zurücksetzen
-    (Profil, Favoriten, Gerichtauswahl). Macht selbst noch nichts.
-    """
-    # /reset kommt als Text-Nachricht
-    msg = update.message
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Ja", callback_data="reset_yes"),
-        InlineKeyboardButton("Nein", callback_data="reset_no"),
-    ]])
-    text = pad_message("Möchtest Du wirklich alles zurücksetzen? Profil, Favoriten, Gerichtauswahl?")
-    sent = await msg.reply_text(text, reply_markup=kb)
-    # merken, um bei „Nein” gezielt löschen zu können (optional)
-    context.user_data["reset_confirm_msg_id"] = sent.message_id
-
-
-# === /reset: Callback-Handler ===
-async def reset_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    chat_id = q.message.chat.id
-    uid = str(q.from_user.id)
-    data = q.data  # 'reset_yes' | 'reset_no'
-
-    # ggf. zuvor gesendete Bestätigungsfrage entfernen
-    confirm_id = context.user_data.pop("reset_confirm_msg_id", None)
-
-    if data == "reset_no":
-        if confirm_id:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=confirm_id)
-            except Exception:
-                pass
-        return ConversationHandler.END
-
-    # === reset_yes ===
-    if confirm_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=confirm_id)
-        except Exception:
-            pass
-
-    # 1) Aktions-/Export-Nachrichten entfernen
-    for mid in context.user_data.get("export_msgs", []):
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-        except Exception:
-            pass
-    context.user_data["export_msgs"] = []
-
-    # 2) Vorschlagskarte gezielt entfernen
-    await delete_proposal_card(context, chat_id)
-
-    # 3) Alle bekannten UI-Listen jetzt leeren
-    for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]:
-        ids = context.user_data.get(key, [])
-        for mid in ids:
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            except Exception:
-                pass
-        context.user_data[key] = []
-    for key in ["proposal_msg_id", "final_list_msg_id"]:
-        context.user_data.pop(key, None)
-
-    # 4) Session (Gerichtauswahl) wirklich zurücksetzen (lokal + Persistenz)
-    if uid in sessions:
-        del sessions[uid]
-    try:
-        ckey = chat_key(int(update.effective_chat.id))
-        store_delete_session(ckey)
-    except Exception:
-        pass
-
-    # 5) QuickOne-Pool beenden
-    context.user_data.pop("quickone_remaining", None)
-
-    # 6) Profile löschen (lokal + Persistenz)
-    try:
-        profiles.pop(uid, None)
-    except Exception:
-        pass
-    try:
-        store_set_profile(user_key(int(uid)), {})  # „leer“ in Persistenz
-    except Exception:
-        pass
-
-    # 7) Favoriten löschen (lokal + Persistenz)
-    try:
-        favorites.pop(uid, None)
-    except Exception:
-        pass
-    try:
-        store_set_favorites(user_key(int(uid)), [])  # leere Liste in Persistenz
-    except Exception:
-        pass
-
-    # 8) Kontext-Speicher komplett leeren (ganz zum Schluss)
-    context.user_data.clear()
-
-    # 9) Abschiedsgruß → danach IN-PLACE in Neustart-Banner verwandeln (gleich wie Restart)
-    try:
-        bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-        await asyncio.sleep(1.2)
-        banner = build_new_run_banner()
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=bye.message_id,
-            text=pad_message(banner),
-        )
-        await asyncio.sleep(1.0)
-    except Exception:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-        except Exception:
-            pass
-        try:
-            banner = build_new_run_banner()
-            await context.bot.send_message(chat_id, pad_message(banner))
-            await asyncio.sleep(1.0)
-        except Exception:
-            pass
-
-    await send_overview(chat_id, context)
-    return ConversationHandler.END
 
 
 ##############################################
@@ -5074,7 +4943,36 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------------------
 # /reset – setzt alles für den Nutzer zurück (ausser Favoriten. Siehte unten  5) für favoriten zurücksetzen)
 # ------------------------------------------------------------------
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
 
+    # 1) Profil entfernen
+    #if uid in profiles:
+    #    del profiles[uid]
+    #    save_profiles()
+
+    # 2) Offene Menü-Session löschen (lokal + Persistenz)
+    if uid in sessions:
+        del sessions[uid]
+    try:
+        store_delete_session(chat_key(int(update.effective_chat.id)))
+    except Exception:
+        pass
+
+    # 3) Wizard-Nachrichten aufräumen (falls gerade ein Loop offen war)
+    await cleanup_prof_loop(context, update.effective_chat.id)
+
+    # 4) Kontext-Speicher leeren
+    context.user_data.clear()
+
+    # 5) Favoriten zurücksetzen
+    #if uid in favorites:
+    #    del favorites[uid]
+    #    save_json(FAVORITES_FILE, favorites)
+
+
+    await update.message.reply_text("🔄 Alles wurde zurückgesetzt. Du kannst neu starten mit /start.")
+    return ConversationHandler.END
 
 
 ##############################################
@@ -5189,12 +5087,12 @@ def main():
     app.add_handler(CommandHandler(["status",  "Status"],  status,             block=True), group=0)
 
     cancel_handler = CommandHandler("cancel", cancel)
-    reset_handler  = app.add_handler(CommandHandler("reset", reset_start))
+    reset_handler  = CommandHandler("reset", reset_command)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setup", setup))
     app.add_handler(CommandHandler("tausche", tausche, filters=filters.Regex(r"^\s*/tausche\s+\d"), block=True))
     #app.add_handler(CommandHandler("status", status)) brauchts nicht mehr, ist schon oben drin
-    app.add_handler(CommandHandler("reset", reset_start))
+    app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("favorit", favorit))
     #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
     app.add_handler(CommandHandler("delete", delete))
@@ -5271,7 +5169,7 @@ def main():
     app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
     app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"))
-    app.add_handler(CallbackQueryHandler(reset_confirm_cb, pattern=r"^reset_(?:yes|no)$"))
+
 
     #### ---- QuickOne-Conversation ----
 
