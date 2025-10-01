@@ -665,42 +665,63 @@ async def render_beilage_precheck_debug(update_or_query, context: ContextTypes.D
 
 
 # === Debug: Verteilungs-Message upsert (ersetzen statt neu anfügen)
+
 async def upsert_distribution_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, *, key: str = "dist_debug_msg_id") -> int:
+    """
+    Aktualisiert die bestehende Debug-Nachricht IN-PLACE.
+    WICHTIG: Niemals löschen + neu senden (sonst springt sie unter die Karte).
+    Falls Edit nicht möglich ist, belassen wir die alte Debug stehen.
+    """
     chat_id = update.effective_chat.id
     prev_id = context.user_data.get(key)
 
-    # 1) Bestehende Debug-Message in-place updaten
     if isinstance(prev_id, int):
         try:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=prev_id, text=text)
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=prev_id, text=pad_message(text))
+            return prev_id
+        except BadRequest as e:
+            # Häufigster Fall: "Message is not modified" → einfach behalten
+            if "Message is not modified" in str(e):
+                return prev_id
+            # Sonst: NICHT löschen. Alte Debug bleibt stehen.
             return prev_id
         except Exception:
-            # Fallback: alte Debug-Message weg
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=prev_id)
-            except Exception:
-                pass
+            # Sicherheit: NIE löschen. Alte Debug bleibt stehen.
+            return prev_id
 
-    # 2) Neu senden
+    # Bisher keine Debug → neu senden (Achtung: Reihenfolge regeln wir in render_proposal_with_debug)
     msg = await context.bot.send_message(chat_id, pad_message(text))
     context.user_data[key] = msg.message_id
     return msg.message_id
 
+
 async def render_proposal_with_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, *, title: str, dishes: list[str], buttons: list[list[InlineKeyboardButton]], replace_old: bool = True,) -> int:
-    # 1) Debug in-place updaten (nur Admins sehen ihn)
+    """
+    Garantiert: Debug steht immer OBERHALB der Karte und beide werden nur in-place ersetzt.
+    Falls noch keine Debug existiert, wird ggf. NUR die Karte gelöscht, dann Debug gesendet,
+    danach die Karte gesendet → Reihenfolge stimmt.
+    """
+    chat_id = update.effective_chat.id
+    had_debug = isinstance(context.user_data.get("dist_debug_msg_id"), int)
+
+    # 1) Debug aufbereiten (nur Admins sehen ihn)
     if show_debug_for(update):
-        try:
-            dbg_txt = build_selection_debug_text(dishes)
-            if dbg_txt:
+        dbg_txt = build_selection_debug_text(dishes)
+        if dbg_txt:
+            if had_debug:
+                # in-place edit, keine Löschung
                 await upsert_distribution_debug(update, context, dbg_txt)
-        except Exception:
-            pass
+            else:
+                # Es gibt noch keinen Debug → evtl. existierende Karte zuerst wegräumen,
+                # damit die frisch gesendete Debug-Message OBEN stehen kann.
+                await delete_only_proposal_card(context, chat_id)
+                await upsert_distribution_debug(update, context, dbg_txt)
+    else:
+        # Kein Debug-Modus → nichts zu tun
+        pass
 
-    # 2) Vorschlagskarte in-place updaten
-    return await upsert_proposal_card(
-        update, context, title=title, dishes=dishes, buttons=buttons
-    )
-
+    # 2) Vorschlagskarte in-place updaten (oder neu senden, wenn keine existiert)
+    return await upsert_proposal_card(update, context, title=title, dishes=dishes, buttons=buttons)
 
 
 
@@ -802,6 +823,16 @@ async def delete_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int)
     if isinstance(did, int):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=did)
+        except Exception:
+            pass
+
+
+async def delete_only_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Löscht ausschließlich die Vorschlagskarte (nicht den Debug darüber)."""
+    pid = context.user_data.pop("proposal_msg_id", None)
+    if isinstance(pid, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=pid)
         except Exception:
             pass
 
@@ -3404,16 +3435,6 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 flow_ids.remove(q.message.message_id)
             except ValueError:
-                pass
-
-        # 3) Debug aktualisieren; falls Debug-Message fehlt, sicherer Fallback über Neu-Render
-        has_debug = isinstance(context.user_data.get("dist_debug_msg_id"), int)
-        if has_debug and show_debug_for(update):
-            try:
-                dbg_txt = build_selection_debug_text(sessions[uid]["menues"])
-                if dbg_txt:
-                    await upsert_distribution_debug(update, context, dbg_txt)
-            except Exception:
                 pass
 
         # 4) Debug + Karte IMMER als Paar neu rendern → Debug garantiert darüber
