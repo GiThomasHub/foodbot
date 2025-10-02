@@ -4534,58 +4534,79 @@ def build_fav_overview_text_for(uid: str) -> str:
     return txt
 
 
-async def fav_render_overview_in_place(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# === FAVORITEN: Overview in-place aktualisieren (Liste immer, Menü optional) ===
+async def fav_render_overview_in_place(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit_menu: bool = False) -> None:
     """
-    Aktualisiert die bestehende Favoriten-Übersicht (list/menu) in-place.
-    Falls die alten Messages nicht mehr editierbar sind, fällt auf fav_start() zurück.
+    Aktualisiert die bestehende Favoriten-Übersicht in-place.
+    Standard: NUR die Favoritenliste (Text) wird editiert.
+    Das Aktions-Menü („Was möchtest Du machen?“) bleibt stehen.
+    Nur bei edit_menu=True wird auch das Menü in-place editiert.
+    Fallback: wenn Edit fehlschlägt, löschen wir gezielt NUR das betroffene Element
+              und senden es neu (IDs in fav_overview_ids werden entsprechend aktualisiert).
     """
     q = update.callback_query
     uid = str(q.from_user.id)
     chat_id = q.message.chat.id
+
     ids = context.user_data.get("fav_overview_ids") or {}
     list_id = ids.get("list")
     menu_id = ids.get("menu")
 
-    # Fallback: keine bekannten Overview-IDs -> neu aufbauen
+    # Wenn uns IDs fehlen, fallback auf kompletten Neuaufbau:
     if not list_id or not menu_id:
         await fav_start(update, context)
         return
 
+    # 1) neuen Text für die Favoritenliste bauen
     txt = build_fav_overview_text_for(uid)
 
-    action_text = (
-        "<u>Was möchtest Du machen?</u>\n\n"
-        "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
-        "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
-        "🔙 <b>Zurück</b> zum Hauptmenü"
-    )
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
-        InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back"),
-    ]])
-
-    # Liste editieren (oder bei Fehler neu senden und IDs aktualisieren)
+    # 2) Favoritenliste IN-PLACE editieren (bevorzugt)
     try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=list_id, text=pad_message(txt))
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=list_id,
+            text=pad_message(txt)
+        )
     except Exception:
+        # Fallback: alte Listen-Nachricht löschen und neu senden
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=list_id)
         except Exception:
             pass
         m1 = await context.bot.send_message(chat_id, pad_message(txt))
         context.user_data.setdefault("fav_overview_ids", {})["list"] = m1.message_id
+        list_id = m1.message_id  # aktualisieren
 
-    # Action-Menü editieren (oder bei Fehler neu senden und IDs aktualisieren)
-    try:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=menu_id, text=action_text, reply_markup=kb)
-    except Exception:
+    # 3) Aktions-Menü optional ebenfalls in-place editieren (Standard: NICHT)
+    if edit_menu:
+        action_text = (
+            "<u>Was möchtest Du machen?</u>\n\n"
+            "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
+            "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
+            "🔙 <b>Zurück</b> zum Hauptmenü"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
+            InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
+            InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back"),
+        ]])
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=menu_id)
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=menu_id,
+                text=action_text,
+                reply_markup=kb
+            )
         except Exception:
-            pass
-        m2 = await context.bot.send_message(chat_id, action_text, reply_markup=kb)
-        context.user_data.setdefault("fav_overview_ids", {})["menu"] = m2.message_id
+            # Fallback: altes Menü löschen und neu senden
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=menu_id)
+            except Exception:
+                pass
+            m2 = await context.bot.send_message(chat_id, action_text, reply_markup=kb)
+            context.user_data.setdefault("fav_overview_ids", {})["menu"] = m2.message_id
+
+        
 
 async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry-Point für /meinefavoriten oder Button „Favoriten“."""
@@ -4897,7 +4918,7 @@ async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Kein neues Overview posten!
     # Wenn etwas entfernt wurde: in-place aktualisieren + Info kurz zeigen (und wieder entfernen)
     if removed > 0:
-        await fav_render_overview_in_place(update, context)
+        await fav_render_overview_in_place(update, context, edit_menu=False)
         info = await q.message.reply_text(f"✅ Du hast {removed} Favorit{'en' if removed != 1 else ''} entfernt.")
         await asyncio.sleep(1.5)
         try:
