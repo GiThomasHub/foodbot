@@ -1622,25 +1622,29 @@ def get_welcome_text() -> str:
             )
 def get_overview_text() -> str:
     return (
-        "<u>Übersicht der Befehle:</u>\n\n"
+        "<u><b>Übersicht der Befehle:</b></u>\n\n"
         "🍲 Lass Dir leckere Gerichte vorschlagen\n\n"
         "⚡ Ein Gericht - Wenns schnell geht!\n\n"
         "🔖 Deine Lieblingsgerichte\n\n"
-        "🛠️ Nützliche Infos und Hilfen\n\n"
-        "🔄️ Starte jederzeit neu"
+        #"🛠️ Nützliche Infos und Hilfen\n\n"
+        #"🔄️ Starte jederzeit neu"
     )
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
-            InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
-        ],
-        [
-            InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
-            InlineKeyboardButton("🛠️ Übersicht", callback_data="start_setup"),
-            InlineKeyboardButton("🔄 Restart",   callback_data="restart_ov"),
-        ],
+        [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
+        [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone")],
+        [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
+
+        #[
+        #    InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
+        #    InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
+        #],
+        #[
+        #    InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
+        #    InlineKeyboardButton("🛠️ Übersicht", callback_data="start_setup"),
+        #    InlineKeyboardButton("🔄 Restart",   callback_data="restart_ov"),
+        #],
     ])
 
 async def send_overview(chat_id: int, context: ContextTypes.DEFAULT_TYPE, edit_message=None):
@@ -1700,15 +1704,12 @@ async def start_setup_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     text = (
-        "🛠 Kommandos im Menu Bot:\n"
-        "/start – Hilfe & Einführung\n"
-        "/menu – generiere Gerichtevorschläge\n"
-        "/meinefavoriten – Übersicht Deiner Favoriten\n"
-        #"/meinProfil – Übersicht Deiner Favoriten\n"
-        "/status – zeigt aktuelle Auswahl\n"
-        "/reset – setzt Session zurück (Favoriten bleiben)\n"
-        "/setup – zeigt alle Kommandos\n"
-        "/neustart – neuer Prozess\n"
+        "🛠 Übersicht:\n"
+        "Dein Foodbot hilft dir schnell und unkompliziert feine Gerichte zusammenzustellen. Für die ganze Woche, für ein paar Tage oder - wenns eilt - einfach Quick and easy ein Gericht.\n\n"
+        "Dank einer geordnete Einkaufsliste sparst Du Zeit beim Einkaufen und hast garantiert alle Zutaten am Start.\n\n"
+        "Der Ablauf ist intuitiv und einfach gestaltet. Über den Menü-Button unten links kannst Du jederzeit neu starten oder alles zurücksetzen:\n\n"
+        "‣ /restart – Unterbreche eine aktuelle Session und starte von vorne\n\n"
+        "‣ /reset – Setze alle Einstellungen zurück. Dein Profil, deine Favoriten und die aktuelle Gerichteselektion verschwinden\n"
         f"\nDeine User-ID: {update.effective_user.id}"
     )
     await q.message.reply_text(
@@ -1725,14 +1726,12 @@ async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     chat_id = update.effective_chat.id
     text = (
-        "🛠 Kommandos im Menu Bot:\n"
-        "/start – Hilfe & Einführung\n"
-        "/menu – generiere Gerichtevorschläge\n"
-        "/meinefavoriten – Übersicht Deiner Favoriten\n"
-        "/status – zeigt aktuelle Auswahl\n"
-        "/reset – (mit Bestätigung) alles zurücksetzen\n"
-        "/setup – zeigt alle Kommandos\n"
-        "/neustart – neuer Prozess\n"
+        "🛠 Übersicht:\n"
+        "Dein Foodbot hilft dir schnell und unkompliziert feine Gerichte zusammenzustellen. Für die ganze Woche, für ein paar Tage oder - wenns eilt - einfach Quick and easy ein Gericht.\n\n"
+        "Dank einer geordnete Einkaufsliste sparst Du Zeit beim Einkaufen und hast garantiert alle Zutaten am Start.\n\n"
+        "Der Ablauf ist intuitiv und einfach gestaltet. Über den Menü-Button unten links kannst Du jederzeit neu starten oder alles zurücksetzen:\n\n"
+        "‣ /restart – Unterbreche eine aktuelle Session und starte von vorne\n\n"
+        "‣ /reset – Setze alle Einstellungen zurück. Dein Profil, deine Favoriten und die aktuelle Gerichteselektion verschwinden\n"
         f"\nDeine User-ID: {update.effective_user.id}"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("Alles klar", callback_data="setup_ack")]])
@@ -4530,7 +4529,7 @@ def build_fav_overview_text_for(uid: str) -> str:
         lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
         sections.append(f"{header}\n{lines}")
 
-    txt = "⭐ <u>Deine Favoriten:</u>\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
+    txt = "⭐ <u><b>Deine Favoriten:</b></u>\n\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
     return txt
 
 
@@ -4580,7 +4579,7 @@ async def fav_render_overview_in_place(update: Update, context: ContextTypes.DEF
     # 3) Aktions-Menü optional ebenfalls in-place editieren (Standard: NICHT)
     if edit_menu:
         action_text = (
-            "<u>Was möchtest Du machen?</u>\n\n"
+            "<u><b>Was möchtest Du machen?</b></u>\n\n"
             "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
             "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
             "🔙 <b>Zurück</b> zum Hauptmenü"
@@ -4638,7 +4637,7 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back")
     ]])
     m2 = await msg.reply_text(
-        "<u>Was möchtest Du machen?</u>\n\n"
+        "<u><b>Was möchtest Du machen?</b></u>\n\n"
         "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
         "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
         "🔙 <b>Zurück</b> zum Hauptmenü",
@@ -4741,7 +4740,7 @@ def _build_numbered_grouped_favs(uid: str) -> tuple[str, dict[int, str]]:
             running += 1
         lines.append("")  # Leerzeile zwischen Gruppen
 
-    text = "⭐ <u><b>Deine Favoriten (Auswahl):</b></u>\n" + "\n".join(lines).strip()
+    text = "⭐ <u><b>Deine Favoriten:</b></u>\n\n" + "\n".join(lines).strip()
     return text, idx_map
 
 
