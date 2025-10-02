@@ -1232,10 +1232,9 @@ async def send_main_buttons(msg):
     """Hauptmenü-Buttons erneut anzeigen (z. B. bei leerer Favoritenliste)."""
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
-        [InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone")],
-        [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
-        InlineKeyboardButton("🛠️ Übersicht",     callback_data="start_setup"),
-    ]])
+        [InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone"),
+        InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
+    ])
     await msg.reply_text(pad_message("➡️ Wähle eine Option:"), reply_markup=kb)
 
 # ============================================================================================
@@ -1617,8 +1616,12 @@ def choose_sides(codes: list[int]) -> list[int]:
 def get_welcome_text() -> str:
     return (
         "👋 Willkommen!\n\n"
-        "Hier ein paar Infos zum Bot:\n\n"
-        "Du kannst Vorschläge für leckere Gerichte erstellen. Nur 1 Gericht oder gleich mehrere für die ganze Woche. Die sortierte Einkaufsliste hilft Dir im Laden Zeit zu sparen.\n\n"
+        "Lass Dir von deinem neuen Assistenten für die Essensplanung leckere Gerichte vorschlagen.\n\n"
+        "Nur ein Gericht oder gleich mehrere für die ganze Woche - Du entscheidest wie viele Gerichte und für wieviele Personen!\n\n"
+        "Verzichtest Du auf Fleisch? Ist bei dir Asiatische Woche angesagt? Im Sommer lieber leichte Küche? Erstelle ein Profil mit Deinen Präferenzen.\n\n"
+        "Lege Favoriten fest, so dass diese öfters vorgeschlagen werden oder Du kannst sie gleich direkt für den Vorschlag selektieren.\n\n"
+        "Die geordnete Einkaufsliste hilft Dir beim Einkaufen Zeit zu sparen und stellt sicher, dass Du beim Kochen alles nötige zur Hand hast. Kopier den Text ins Email, lade die Listen als PDF runter oder exportiere die Einkaufsliste direkt in deine Bring! app.\n\n"
+        "Viel Spass und en Guete.\n\n"
             )
 def get_overview_text() -> str:
     return (
@@ -1633,8 +1636,8 @@ def get_overview_text() -> str:
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
-        [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone")],
-        [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
+        [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
+        InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
 
         #[
         #    InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
