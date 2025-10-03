@@ -4524,7 +4524,7 @@ def build_fav_overview_text_for(uid: str) -> str:
         lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
         sections.append(f"{header}\n{lines}")
 
-    txt = "⭐ <u><b>Deine Favoriten:</b></u>\n\n" + ("\n\n".join(sections) if sections else "(keine Favoriten)")
+    txt = pad_message("⭐ <u><b>Deine Favoriten:</b></u>\n\n") + ("\n\n".join(sections) if sections else "(keine Favoriten)")
     return txt
 
 
@@ -4735,7 +4735,7 @@ def _build_numbered_grouped_favs(uid: str) -> tuple[str, dict[int, str]]:
             running += 1
         lines.append("")  # Leerzeile zwischen Gruppen
 
-    text = "⭐ <u><b>Deine Favoriten:</b></u>\n\n" + "\n".join(lines).strip()
+    text = pad_message("⭐ <u><b>Deine Favoriten:</b></u>\n\n") + "\n".join(lines).strip()
     return text, idx_map
 
 
