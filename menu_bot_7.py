@@ -210,9 +210,6 @@ WEIGHT_CHOICES = {f"weight_{i}": i for i in range(1, 8)}
 WEIGHT_CHOICES["weight_any"] = None          #  «Egal» = keine Einschränkung
 
 
-
-
-
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # === Utilites: Load/Save Helpers ===
@@ -954,7 +951,7 @@ def build_beilage_keyboard(allowed_codes: set[int], selected: list[int]) -> Inli
         label = f"{'✅ ' if code in selected else ''}{name}"
         btns.append(InlineKeyboardButton(label, callback_data=f"beilage_{code}"))
     rows = distribute_buttons_equally(btns, max_per_row=3)
-    footer = InlineKeyboardButton("Fertig" if selected else "Weiter ohne Beilage", callback_data="beilage_done")
+    footer = InlineKeyboardButton("✔️ Fertig" if selected else "Weiter ohne Beilage", callback_data="beilage_done")
     rows.append([footer])
     return InlineKeyboardMarkup(rows)
 
@@ -1092,11 +1089,6 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 
 
 
-
-
-
-
-
 # ============================================================================================
 # ===================================== FAVORITEN–HELPER =====================================
 # ============================================================================================
@@ -1231,7 +1223,7 @@ def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based:
 async def send_main_buttons(msg):
     """Hauptmenü-Buttons erneut anzeigen (z. B. bei leerer Favoritenliste)."""
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
+        [InlineKeyboardButton("🍲 Menüvorschlag",      callback_data="start_menu")],
         [InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone"),
         InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
     ])
@@ -1297,7 +1289,6 @@ def lade_gerichtebasis():
     return df.drop_duplicates()
 
 
-
 def lade_beilagen():
     sheet = client.open_by_key(SHEET_ID).worksheet("Beilagen")
     raw = sheet.get_all_values()[1:]       # überspringe Header
@@ -1343,7 +1334,6 @@ def allowed_sides_for_dish(dish: str) -> set[int]:
         # explizite Nummern, die real existieren
         allowed |= set(x for x in base if x not in (88, 77, 99) and x in all_nums)
     return allowed
-
 
 
 def lade_zutaten():
@@ -1616,26 +1606,27 @@ def choose_sides(codes: list[int]) -> list[int]:
 def get_welcome_text() -> str:
     return (
         "👋 Willkommen!\n\n"
-        "Lass Dir von deinem neuen Assistenten für die Essensplanung leckere Gerichte vorschlagen.\n\n"
-        "Nur ein Gericht oder gleich mehrere für die ganze Woche - Du entscheidest wie viele Gerichte und für wieviele Personen!\n\n"
-        "Verzichtest Du auf Fleisch? Ist bei dir Asiatische Woche angesagt? Im Sommer lieber leichte Küche? Erstelle ein Profil mit Deinen Präferenzen.\n\n"
-        "Lege Favoriten fest, so dass diese öfters vorgeschlagen werden oder Du kannst sie gleich direkt für den Vorschlag selektieren.\n\n"
-        "Die geordnete Einkaufsliste hilft Dir beim Einkaufen Zeit zu sparen und stellt sicher, dass Du beim Kochen alles nötige zur Hand hast. Kopier den Text ins Email, lade die Listen als PDF runter oder exportiere die Einkaufsliste direkt in deine Bring! app.\n\n"
-        "Viel Spass und en Guete.\n\n"
+        "Dein Assistent für die Essensplanung steht Dir jederzeit mit leckere Kochideen zur Seite.\n\n"
+        "Ein Gericht oder mehrere für die ganze Woche? Du bestimmst Anzahl Gerichte und Personen.\n\n"
+        "Kein Fleisch? Asiatische Woche? Im Sommer lieber leicht? Erstelle ein Profil mit deinen Präferenzen.\n\n"
+        "Setze Favoriten, damit sie öfter erscheinen – oder wähle sie direkt für den Vorschlag aus.\n\n"
+        "Die sortierte Einkaufsliste spart Zeit und stellt sicher, dass beim Kochen alles da ist. Kopiere sie ins E-Mail, lade sie als PDF herunter oder exportiere sie direkt in die Bring!-App.\n\n"
+        "Viel Spass und en Guete!\n"      
             )
+
 def get_overview_text() -> str:
     return (
         "<u><b>Übersicht der Befehle:</b></u>\n\n"
         "🍲 Lass Dir leckere Gerichte vorschlagen\n\n"
-        "⚡ Ein Gericht - Wenns schnell geht!\n\n"
-        "🔖 Deine Lieblingsgerichte\n\n"
+        "⚡ Ein Gericht - wenn’s schnell gehen muss\n\n"
+        "🔖 Lieblingsgerichte anzeigen\n\n"
         #"🛠️ Nützliche Infos und Hilfen\n\n"
         #"🔄️ Starte jederzeit neu"
     )
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🍲 Menü",      callback_data="start_menu")],
+        [InlineKeyboardButton("🍲 Menüvorschlag",      callback_data="start_menu")],
         [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
         InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
 
@@ -1708,13 +1699,14 @@ async def start_setup_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     text = (
         "🛠 Übersicht:\n"
-        "Dein Foodbot hilft dir schnell und unkompliziert feine Gerichte zusammenzustellen. Für die ganze Woche, für ein paar Tage oder - wenns eilt - einfach Quick and easy ein Gericht.\n\n"
-        "Dank einer geordnete Einkaufsliste sparst Du Zeit beim Einkaufen und hast garantiert alle Zutaten am Start.\n\n"
+        "Plane schnell und unkompliziert leckere Gerichte – für heute oder die ganze Woche.\n\n"
+        "Die sortierte Einkaufsliste spart Zeit und stellt sicher, dass beim Kochen alles da ist.\n\n"
         "Der Ablauf ist intuitiv und einfach gestaltet. Über den Menü-Button unten links kannst Du jederzeit neu starten oder alles zurücksetzen:\n\n"
         "‣ /restart – Unterbreche eine aktuelle Session und starte von vorne\n\n"
         "‣ /reset – Setze alle Einstellungen zurück. Dein Profil, deine Favoriten und die aktuelle Gerichteselektion verschwinden\n"
-        f"\nDeine User-ID: {update.effective_user.id}"
+        f"\nDeine User-ID: {update.effective_user.id}"   
     )
+    
     await q.message.reply_text(
         text,
         reply_markup=InlineKeyboardMarkup([[
@@ -1730,8 +1722,8 @@ async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = (
         "🛠 Übersicht:\n"
-        "Dein Foodbot hilft dir schnell und unkompliziert feine Gerichte zusammenzustellen. Für die ganze Woche, für ein paar Tage oder - wenns eilt - einfach Quick and easy ein Gericht.\n\n"
-        "Dank einer geordnete Einkaufsliste sparst Du Zeit beim Einkaufen und hast garantiert alle Zutaten am Start.\n\n"
+        "Plane schnell und unkompliziert leckere Gerichte – für heute oder die ganze Woche.\n\n"
+        "Die sortierte Einkaufsliste spart Zeit und stellt sicher, dass beim Kochen alles da ist.\n\n"
         "Der Ablauf ist intuitiv und einfach gestaltet. Über den Menü-Button unten links kannst Du jederzeit neu starten oder alles zurücksetzen:\n\n"
         "‣ /restart – Unterbreche eine aktuelle Session und starte von vorne\n\n"
         "‣ /reset – Setze alle Einstellungen zurück. Dein Profil, deine Favoriten und die aktuelle Gerichteselektion verschwinden\n"
