@@ -1,3 +1,4 @@
+
 import os
 import re
 import json
@@ -5,7 +6,6 @@ import random
 import pandas as pd
 import gspread
 import warnings
-import requests                                                 #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 import urllib.request
 import logging
 import base64, gzip, time
@@ -16,21 +16,18 @@ from aiohttp import web
 from html import escape, unescape
 from datetime import datetime
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler    #HTTPServer könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from collections import Counter
 from fpdf import FPDF                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from fpdf.enums import XPos, YPos
 from dotenv import load_dotenv
-from oauth2client.service_account import ServiceAccountCredentials
 from openai import OpenAI
-from typing import Set                                         #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from decimal import Decimal, ROUND_HALF_UP
 from google.cloud import firestore
+from telegram.constants import ParseMode
+from google.oauth2.service_account import Credentials
 from telegram.error import BadRequest
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram
-from telegram.constants import ChatAction, ParseMode        #ChatAction und ParseMode könnten gelöscht werden -> ausprobieren wenn mal zeit besteht
-from telegram.helpers import escape_markdown                #könnte gelöscht werden -> ausprobieren wenn mal zeit besteht
 from persistence import (
     user_key,
     get_profile as store_get_profile, set_profile as store_set_profile,
@@ -47,6 +44,7 @@ from telegram.ext import (
     ConversationHandler,
     ContextTypes,
     CallbackQueryHandler,
+    Defaults,
 )
 from telegram.warnings import PTBUserWarning
 
@@ -76,47 +74,6 @@ MENU_INPUT, ASK_BEILAGEN, SELECT_MENUES, BEILAGEN_SELECT, ASK_FINAL_LIST, ASK_SH
 # HELPER:
 
 # === Cloud Run: Health + Telegram Webhook via aiohttp ===
-def run_cloudrun_server(app, port, url_path, webhook_url, secret_token):
-    from aiohttp import web
-    from telegram import Update
-
-    async def _health(_req):
-        return web.Response(text="OK", status=200)
-
-    async def _tg_webhook(req):
-        try:
-            data = await req.json()
-        except Exception:
-            return web.Response(text="bad json", status=400)
-        upd = Update.de_json(data, app.bot)
-        await app.process_update(upd)
-        return web.Response(text="OK", status=200)
-
-    aio = web.Application()
-    aio.router.add_get("/webhook/health", _health)
-    aio.router.add_post(f"/{url_path}", _tg_webhook)
-
-    async def _on_startup(_):
-        await app.initialize()
-        try:
-            await app.bot.set_webhook(url=webhook_url, secret_token=secret_token)
-            print("✅ set_webhook OK")
-        except Exception as e:
-            print(f"⚠️ set_webhook failed: {e} — continuing")
-        await app.start()
-
-    async def _on_cleanup(_):
-        await app.stop()
-        await app.shutdown()
-        try:
-            await HTTPX_CLIENT.aclose()
-        except Exception:
-            pass
-
-    aio.on_startup.append(_on_startup)
-    aio.on_cleanup.append(_on_cleanup)
-    web.run_app(aio, host="0.0.0.0", port=port)
-
 
 def _compute_base_url():
     # 1) Falls gesetzt, einfach nehmen
@@ -163,12 +120,35 @@ SHEETS_CACHE_TTL_SEC = int(os.getenv("SHEETS_CACHE_TTL_SEC", "3600"))
 SHEETS_CACHE_NAMESPACE = os.getenv("SHEETS_CACHE_NAMESPACE", "v1")
 
 # Firestore-Client nur nutzen, wenn PERSISTENCE=firestore (Prod)
-FS = firestore.Client() if PERSISTENCE == "firestore" else None
+try:
+    FS = firestore.Client() if PERSISTENCE == "firestore" else None
+except Exception as e:
+    logging.warning("Firestore-Init fehlgeschlagen (%s) – Sheets-Cache wird deaktiviert.", e)
+    FS = None
 
 
+def _get_openai_client():
+    """
+    OpenAI nur verwenden, wenn OPENAI_API_KEY gesetzt ist. 
+    Fehlerresistent initialisieren (kein Crash bei fehlendem Key/Paket).
+    """
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        return None
+    try:
+        from openai import OpenAI
+        return OpenAI(api_key=key, timeout=20, max_retries=1)
+    except Exception as e:
+        logging.warning("OpenAI init übersprungen: %s", e)
+        return None
 
-# Instantiate OpenAI client (new SDK)
-openai_client = OpenAI(api_key=OPENAI_KEY, timeout=20, max_retries=1)
+def _fallback_steps(dish: str, zut_text: str) -> str:
+    return (
+        "1) Zutaten bereitstellen und vorbereiten.\n"
+        f"2) {dish} nach üblicher Methode zubereiten.\n"
+        "3) Abschmecken und anrichten.\n"
+        "4) Guten Appetit!"
+    )
 
 scope = [
     "https://spreadsheets.google.com/feeds",
@@ -176,10 +156,11 @@ scope = [
 ]
 gc = os.getenv("GOOGLE_CRED_JSON")
 if gc and gc.strip().startswith("{"):
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(gc), scope)
+    creds = Credentials.from_service_account_info(json.loads(gc), scopes=scope)
 else:
-    creds = ServiceAccountCredentials.from_json_keyfile_name(gc or "credentials.json", scope)
+    creds = Credentials.from_service_account_file(gc or "credentials.json", scopes=scope)
 client = gspread.authorize(creds)
+
 
 # === Persistence Files ===
 DATA_DIR = os.getenv("DATA_DIR","/tmp")
@@ -213,23 +194,20 @@ ART_ORDER = {"1": 1, "2": 2, "3": 3}
 
 # Emoji-Zuordnung für Kategorien
 CAT_EMOJI = {
-    "Fleisch & Fisch":       "🥩🐟",
-    "Obst & Gemüse":        "🍎🥕",
-    "Getränke":      "🧃🍷",
-    "Trockenware & Vorrat":"🍝🥫",
-    "Milchwaren":    "🧀🥛",
-    "Backwaren":     "🥖🥐",
-    "Kühlregal": "🥶🧊",
-    "Haushalt & Sonstiges": "🧽🧻",
+    "Fleisch & Fisch":       "🥩",    #"🥩🐟",
+    "Obst & Gemüse":        "🥕",     #"🍎🥕",
+    "Getränke":      "🧃",            #"🧃🍷",
+    "Trockenware & Vorrat":"🥫",      #"🍝🥫",
+    "Milchwaren":    "🥛",           #"🧀🥛",
+    "Backwaren":     "🥖",       #"🥖🥐",
+    "Kühlregal": "🥶",             #"🥶🧊",
+    "Haushalt & Sonstiges": "🧻",  #"🧽🧻",
 
 }
 
 
 WEIGHT_CHOICES = {f"weight_{i}": i for i in range(1, 8)}
 WEIGHT_CHOICES["weight_any"] = None          #  «Egal» = keine Einschränkung
-
-
-
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -239,20 +217,28 @@ WEIGHT_CHOICES["weight_any"] = None          #  «Egal» = keine Einschränkung
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # Nur für Admins: Aufwand-Verteilung anzeigen
-def show_debug_for(update: Update) -> bool:
-    ADMIN_IDS = {7650843881}  # in telegram @userinfobot ersichtlich
-    return update.effective_user.id in ADMIN_IDS
+def show_debug_for(obj) -> bool:
+    default_ids = {7650843881}
+    raw = (os.getenv("ADMIN_IDS") or "").strip()
+    try:
+        env_ids = {int(x) for x in raw.split(",") if x.strip()}
+    except ValueError:
+        env_ids = set()
+    admin_ids = env_ids or default_ids
 
+    uid = None
+    # Update
+    if getattr(obj, "effective_user", None):
+        uid = obj.effective_user.id
+    # CallbackQuery
+    elif getattr(obj, "from_user", None):
+        uid = obj.from_user.id
+    # Message (Fallback)
+    elif getattr(obj, "message", None) and getattr(obj.message, "from_user", None):
+        uid = obj.message.from_user.id
 
-def load_json(path):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return uid in admin_ids if uid is not None else False
 
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 # ---------- Sheets-Cache (Firestore) ----------
 def _df_to_compact_json(df: pd.DataFrame) -> dict:
@@ -275,30 +261,46 @@ def _fs_doc_for(name: str):
 def _cache_read_if_fresh(name: str, ttl_sec: int):
     if not FS:
         return None
-    doc = _fs_doc_for(name).get()
+    try:
+        doc = _fs_doc_for(name).get()
+    except Exception as e:
+        logging.warning("Sheets-Cache: Firestore-Read fehlgeschlagen (%s) → Fallback auf Sheets", e)
+        return None
+
     if not doc.exists:
         return None
+
     d = doc.to_dict() or {}
     updated_ts = int(d.get("updated_ts", 0))
     if time.time() - updated_ts > ttl_sec:
         return None  # abgelaufen
+
     try:
         payload = gzip.decompress(base64.b64decode(d["payload_b64_gzip"]))
         return json.loads(payload.decode("utf-8"))
-    except Exception:
+    except Exception as e:
+        logging.warning("Sheets-Cache: Dekomprimieren/JSON fehlgeschlagen (%s) → Fallback auf Sheets", e)
         return None
+
 
 def _cache_write(name: str, compact_obj: dict):
     if not FS:
         return
-    payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
-    b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
-    _fs_doc_for(name).set({
-        "payload_b64_gzip": b64,
-        "updated_ts": int(time.time()),
-        "ttl_sec": SHEETS_CACHE_TTL_SEC,
-        "schema_version": 1,
-    }, merge=True)
+    try:
+        payload = json.dumps(compact_obj, ensure_ascii=False).encode("utf-8")
+        b64 = base64.b64encode(gzip.compress(payload)).decode("ascii")
+        _fs_doc_for(name).set(
+            {
+                "payload_b64_gzip": b64,
+                "updated_ts": int(time.time()),
+                "ttl_sec": SHEETS_CACHE_TTL_SEC,
+                "schema_version": 1,
+            },
+            merge=True,
+        )
+    except Exception as e:
+        logging.warning("Sheets-Cache: Firestore-Write fehlgeschlagen (%s) – ignoriere und fahre fort", e)
+
 
 def load_favorites() -> dict:
     """Favoriten aus Datei laden (oder leeres Dict, wenn Datei fehlt)"""
@@ -328,6 +330,136 @@ def format_amount(q):
     # Sonst normalize, um überflüssige Nullen zu entfernen
     return format(qd2.normalize(), 'f')
 
+# NEW — Mengen-/Einheiten-Normalisierung (g↔kg, ml↔dl↔l)
+def normalize_quantity(amount, unit):
+    """
+    Normalisiert numerische Mengen inkl. Einheiten.
+    Regeln:
+      - g:  >= 1000 → kg
+      - ml: >= 1000 → l, sonst >= 100 → dl
+      - dl: >= 10   → l
+    Alle anderen Einheiten bleiben unverändert.
+    Rückgabe: (amount, unit)
+    """
+    try:
+        a = float(amount)
+    except Exception:
+        return amount, unit
+
+    u_raw = (unit or "").strip()
+    u = u_raw.lower()
+
+    # Gramm → Kilogramm
+    if u in ("g", "gramm", "gr"):
+        if a >= 1000:
+            return a / 1000.0, "kg"
+        return a, "g"
+
+    # Milliliter → Deziliter/Liter
+    if u in ("ml", "milliliter"):
+        if a >= 1000:
+            return a / 1000.0, "l"
+        if a >= 100:
+            return a / 100.0, "dl"
+        return a, "ml"
+
+    # Deziliter → Liter
+    if u in ("dl", "deziliter"):
+        if a >= 10:
+            return a / 10.0, "l"
+        return a, "dl"
+
+    # Liter bleibt Liter
+    if u in ("l", "liter"):
+        return a, "l"
+
+    # Unbekannt/andere Einheiten: nichts ändern
+    return a, u_raw
+
+
+def dishes_header(count: int, step: int | None = None) -> str:
+    """
+    Baut den Titel für die Gerichte-Liste.
+    - count=1  → 'Deine Auswahl:'
+    - count>1  → 'Deine Auswahl:'
+    - step     → optionaler Debug-/Schrittzähler in Klammern, z. B. (3)
+    """
+    base = "Deine Auswahl" if count == 1 else "Deine Auswahl"
+    suffix = f"({step})" if step is not None else ""
+    return f"🥣 <u><b>{base}:</b></u>"      #falls nummerierung nach "Deine Gerichte" bspw. "Deine Gerichte(1)" nötig: return f"🥣 <u><b>{base}{suffix}:</b></u>"
+
+# Zentral "Deine Gerichte"
+async def show_final_dishes_and_ask_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, *, step: int | None = None, remove_proposal: bool = True, clear_flow: bool = True,) -> int:
+    """
+    Zentrale Ausgabe:
+      1) optional 'Vorschlag/Neuer Vorschlag' + zugehöriges Verteilungs-Debug entfernen
+      2) optional Debug/flow-Messages (flow_msgs) löschen
+      3) finale Gerichteliste rendern
+      4) Personen-Dialog starten
+    """
+    uid = str(update.effective_user.id)
+    chat_id = update.effective_chat.id
+
+    # 1) Karte + Debug IMMER als Paar behandeln
+    if remove_proposal:
+        await delete_proposal_card(context, chat_id)
+
+    # 2) Flow-Messages aufräumen
+    if clear_flow:
+        await reset_flow_state(
+            update, context,
+            reset_session=False, delete_messages=True,
+            only_keys=["flow_msgs"]
+        )
+
+    # 3) Finale Liste
+    menus = sessions.get(uid, {}).get("menues", [])
+    text  = dishes_header(len(menus), step=step) + "\n"
+    for dish in menus:
+        sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
+        side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
+        text      += format_hanging_line(
+            escape(format_dish_with_sides(dish, side_names)),
+            bullet="‣", indent_nbsp=2, wrap_at=60
+        ) + "\n"
+
+    msg = await context.bot.send_message(chat_id, pad_message(text))
+    context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+
+    # 4) Personen-Dialog
+    return await ask_for_persons(update, context)
+
+
+
+# ---- Debounced Redraw für 'Definiere Aufwand' ----
+async def _debounced_aufwand_render(q, context):
+    # schon ein Render geplant?
+    task = context.user_data.get("aufw_render_task")
+    if task and not task.done():
+        # nur markieren, dass ein neuer Stand vorhanden ist
+        context.user_data["aufw_dirty"] = True
+        return
+
+    context.user_data["aufw_dirty"] = True
+
+    async def _runner():
+        try:
+            # kurzer Puffer für schnelle Mehrfachklicks
+            await asyncio.sleep(0.12)
+            if context.user_data.get("aufw_dirty"):
+                context.user_data["aufw_dirty"] = False
+                verteilung = context.user_data["aufwand_verteilung"]
+                total = context.user_data["menu_count"]
+                await q.message.edit_reply_markup(
+                    reply_markup=build_aufwand_keyboard(verteilung, total)
+                )
+        except Exception:
+            pass
+        finally:
+            context.user_data["aufw_render_task"] = None
+
+    context.user_data["aufw_render_task"] = asyncio.create_task(_runner())
+
 
 def load_json(filename):
     try:
@@ -344,15 +476,15 @@ def save_json(filename, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 def build_swap_keyboard(menus: list[str], selected: set[int]) -> InlineKeyboardMarkup:
-    """Buttons 1…N mit Toggle-Häkchen + ‘Fertig’."""
+    """Buttons 1…N mit Toggle-Häkchen + dynamischem Footer ('(kein tausch)'/ 'Weiter')."""
     btns = []
     for idx, _g in enumerate(menus, 1):
         label = f"{'✅ ' if idx in selected else ''}{idx}"
         btns.append(InlineKeyboardButton(label, callback_data=f"swap_sel:{idx}"))
     rows = distribute_buttons_equally(btns, max_per_row=7)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="swap_done")])
+    footer_label = "Weiter" if selected else "(kein Tausch)"
+    rows.append([InlineKeyboardButton(footer_label, callback_data="swap_done")])
     return InlineKeyboardMarkup(rows)
-
 
 
 def format_dish_with_sides(dish: str, sides: list[str]) -> str:
@@ -484,7 +616,30 @@ async def cleanup_prof_loop(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     context.user_data["prof_msgs"] = []
 
 
-def pad_message(text: str, min_width: int = 35) -> str:
+async def cleanup_prof_loop_except_start(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """
+    Löscht alle während des Profil-Wizards entstandenen Nachrichten,
+    AUSGENOMMEN die gemerkte Startfrage 'Wie möchtest Du fortfahren?'.
+    """
+    start_id = context.user_data.get("prof_start_msg_id")
+    msg_ids: list[int] = context.user_data.get("prof_msgs", [])
+
+    for mid in msg_ids:
+        if isinstance(start_id, int) and mid == start_id:
+            continue
+        try:
+            await context.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+    # Liste auf die Startfrage reduzieren (falls vorhanden)
+    if isinstance(start_id, int):
+        context.user_data["prof_msgs"] = [start_id]
+    else:
+        context.user_data["prof_msgs"] = []
+
+
+def pad_message(text: str, min_width: int = 35) -> str:                       # definiert breite der nachrichten bzw. min breite
     """
     Füllt **nur die erste Zeile** von `text` mit Non-Breaking Spaces (U+00A0)
     auf, bis sie mindestens min_width Zeichen lang ist.
@@ -496,62 +651,441 @@ def pad_message(text: str, min_width: int = 35) -> str:
         first += "\u00A0" * (min_width - len(first))
     return first + ("\n" + rest if rest else "")
 
+async def safe_delete_and_untrack(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, list_key: str = "flow_msgs") -> None:
+    """
+    Löscht eine Nachricht tolerant und entfernt deren ID aus der gegebenen Tracking-Liste.
+    """
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+    try:
+        ids = context.user_data.get(list_key, [])
+        if isinstance(ids, list):
+            ids[:] = [mid for mid in ids if mid != message_id]
+    except Exception:
+        pass
 
+
+async def render_beilage_precheck_debug(update_or_query, context: ContextTypes.DEFAULT_TYPE, dishes_or_single, prefix: str = "DEBUG Beilagenvorprüfung:") -> None:
+    """
+    Baut und sendet den DEBUG-Text zur Beilagen-Vorprüfung für ein einzelnes Gericht oder eine Liste von Gerichten.
+    Nachricht wird in flow_msgs getrackt.
+    """
+    if not show_debug_for(update_or_query):
+        return
+
+    try:
+        # unify: ein Gericht → Liste
+        if isinstance(dishes_or_single, str):
+            dishes = [dishes_or_single]
+        else:
+            dishes = list(dishes_or_single or [])
+
+        lines = []
+        for dish in dishes:
+            try:
+                raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
+                raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
+            except Exception:
+                raw = "<err>"
+            codes = parse_codes(raw)
+            nz = [c for c in codes if c != 0]
+            allowed = sorted(list(allowed_sides_for_dish(dish)))[:12]
+            lines.append(f"{dish}: raw='{raw}' → codes={codes} → nz={nz} → allowed={allowed} (n={len(allowed)})")
+
+        if not lines:
+            return
+
+        dbg = prefix + "\n" + "\n".join(lines)
+
+        # robust: update_or_query kann Update oder CallbackQuery sein
+        msg_obj = getattr(update_or_query, "message", None) or getattr(update_or_query, "effective_message", None)
+        if msg_obj is None:
+            return
+        m = await msg_obj.reply_text(dbg)
+        context.user_data.setdefault("flow_msgs", []).append(m.message_id)
+    except Exception:
+        pass
+
+
+# === Debug: Verteilungs-Message upsert (ersetzen statt neu anfügen)
+
+async def upsert_distribution_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, *, key: str = "dist_debug_msg_id") -> int:
+    """
+    Aktualisiert die bestehende Debug-Nachricht IN-PLACE.
+    WICHTIG: Niemals löschen + neu senden (sonst springt sie unter die Karte).
+    Falls Edit nicht möglich ist, belassen wir die alte Debug stehen.
+    """
+    chat_id = update.effective_chat.id
+    prev_id = context.user_data.get(key)
+
+    if isinstance(prev_id, int):
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=prev_id, text=pad_message(text))
+            return prev_id
+        except BadRequest as e:
+            # Häufigster Fall: "Message is not modified" → einfach behalten
+            if "Message is not modified" in str(e):
+                return prev_id
+            # Sonst: NICHT löschen. Alte Debug bleibt stehen.
+            return prev_id
+        except Exception:
+            # Sicherheit: NIE löschen. Alte Debug bleibt stehen.
+            return prev_id
+
+    # Bisher keine Debug → neu senden (Achtung: Reihenfolge regeln wir in render_proposal_with_debug)
+    msg = await context.bot.send_message(chat_id, pad_message(text))
+    context.user_data[key] = msg.message_id
+    return msg.message_id
+
+
+async def render_proposal_with_debug(update: Update, context: ContextTypes.DEFAULT_TYPE, *, title: str, dishes: list[str], buttons: list[list[InlineKeyboardButton]], replace_old: bool = True,) -> int:
+    """
+    Garantiert: Debug steht immer OBERHALB der Karte und beide werden nur in-place ersetzt.
+    Falls noch keine Debug existiert, wird ggf. NUR die Karte gelöscht, dann Debug gesendet,
+    danach die Karte gesendet → Reihenfolge stimmt.
+    """
+    chat_id = update.effective_chat.id
+    had_debug = isinstance(context.user_data.get("dist_debug_msg_id"), int)
+
+    # 1) Debug aufbereiten (nur Admins sehen ihn)
+    if show_debug_for(update):
+        dbg_txt = build_selection_debug_text(dishes)
+        if dbg_txt:
+            if had_debug:
+                # in-place edit, keine Löschung
+                await upsert_distribution_debug(update, context, dbg_txt)
+            else:
+                # Es gibt noch keinen Debug → evtl. existierende Karte zuerst wegräumen,
+                # damit die frisch gesendete Debug-Message OBEN stehen kann.
+                await delete_only_proposal_card(context, chat_id)
+                await upsert_distribution_debug(update, context, dbg_txt)
+    else:
+        # Kein Debug-Modus → nichts zu tun
+        pass
+
+    # 2) Vorschlagskarte in-place updaten (oder neu senden, wenn keine existiert)
+    return await upsert_proposal_card(update, context, title=title, dishes=dishes, buttons=buttons)
+
+
+
+def format_hanging_line(text: str, *, bullet: str = "‣", indent_nbsp: int = 4, wrap_at: int = 60) -> str:
+    from html import unescape as _unescape
+    nbsp = "\u00A0"   # NBSP
+    wj   = "\u2060"   # WORD JOINER (zero-width, verhindert Kollaps)
+    fig  = "\u2007"   # FIGURE SPACE (non-collapsing, monowidth-ish)
+    pipe = "│"        # optische Führung
+
+    prefix = f"{bullet}{nbsp}"
+    # Word-Joiner voranstellen, damit die folgenden Spaces nicht „verschluckt“ werden
+    hang   = pipe + wj + (fig * indent_nbsp)
+
+    words = str(text or "").split()
+    if not words:
+        return prefix
+
+    lines = []
+    cur = prefix + words[0]
+    for w in words[1:]:
+        tentative   = cur + " " + w
+        visible_len = len(_unescape(tentative.replace(nbsp, " ")))
+        if visible_len > wrap_at:
+            lines.append(cur)
+            cur = hang + w
+        else:
+            cur = tentative
+
+    lines.append(cur)
+    return "\n".join(lines)
+
+def build_selection_debug_text(menues: list[str]) -> str:
+    """
+    Baut eine kurze DEBUG-Übersicht zur aktuellen Auswahl:
+    Aufwand-, Küchen-, Typ- und Ernährungsstil-Verteilung.
+    """
+    if not menues:
+        return ""
+    sel = df_gerichte[df_gerichte["Gericht"].isin(menues)]
+    if sel.empty:
+        return ""
+
+    from collections import Counter
+    c_aw   = Counter(sel["Aufwand"])
+    c_k    = Counter(sel["Küche"])
+    c_typ  = Counter(int(pd.to_numeric(t, errors="coerce")) for t in sel["Typ"])
+    c_erna = Counter(sel["Ernährungsstil"])
+
+    # feste Reihenfolge für Aufwand
+    aufwand_text = ", ".join(f"{c_aw.get(i,0)} x {i}" for i in (1, 2, 3))
+    kitchen_text = ", ".join(f"{v} x {k}" for k, v in c_k.items())
+    typ_text     = ", ".join(f"{c_typ.get(i,0)} x {i}" for i in (1, 2, 3))
+    einschr_text = ", ".join(f"{v} x {k}" for k, v in c_erna.items())
+
+    lines = [
+        f"📊 Aufwand-Verteilung: {aufwand_text}",
+        f"🎨 Küche-Verteilung: {kitchen_text}",
+        f"⚙️ Typ-Verteilung: {typ_text}",
+        f"🥗 Ernährungsstil-Verteilung: {einschr_text}",
+    ]
+    return "\n".join(lines)
+
+
+# NEW: track IDs von Nachrichten, die wir beim Neustart gezielt löschen wollen
+def _track_export_msg(context: "ContextTypes.DEFAULT_TYPE", msg_id: int) -> None:
+    if not isinstance(msg_id, int):
+        return
+    context.user_data.setdefault("export_msgs", []).append(msg_id)
+
+
+def build_new_run_banner() -> str:
+    """Erzeugt die Statuszeile 'Neuer Lauf: Wochentag, TT.MM.YY, HH:MM Uhr' (deutsche Wochentage)."""
+    now = datetime.now()
+    wdays = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    wday = wdays[now.weekday()]
+    stamp = now.strftime("%d. %b %Y")
+    return f"🔄 <u><b>Neustart: {wday}, {stamp}</b></u>"
+
+##### 3 Helper für Optimierung Nachrichtenlöschung -> Zentral und nicht mehr in den Funktionen einzeln
+
+# ===== Zentraler Flow-Reset & Mini-Helper =====
+
+def track_msg(context: ContextTypes.DEFAULT_TYPE, key: str, mid: int) -> None:
+    if isinstance(mid, int):
+        context.user_data.setdefault(key, []).append(mid)
+
+async def delete_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    # Vorschlagskarte
+    pid = context.user_data.pop("proposal_msg_id", None)
+    if isinstance(pid, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+        except Exception:
+            pass
+
+    # Verteilungs-Debug
+    did = context.user_data.pop("dist_debug_msg_id", None)
+    if isinstance(did, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=did)
+        except Exception:
+            pass
+
+
+async def delete_only_proposal_card(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Löscht ausschließlich die Vorschlagskarte (nicht den Debug darüber)."""
+    pid = context.user_data.pop("proposal_msg_id", None)
+    if isinstance(pid, int):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+        except Exception:
+            pass
+
+
+async def send_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE, title: str, dishes: list[str] | None = None, *, buttons: list[list[InlineKeyboardButton]] | None = None, replace_old: bool = True,) -> int:
+    uid = str(update.effective_user.id)
+    chat_id = update.effective_chat.id
+    if replace_old:
+        await delete_proposal_card(context, chat_id)
+
+    if dishes is None:
+        dishes = sessions.get(uid, {}).get("menues", [])
+
+    header = f"🥣 <u><b>{title}</b></u>"
+    lines = [
+        format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
+        for g in (dishes or [])
+    ]
+    body = "\n".join(lines)
+
+    kb     = InlineKeyboardMarkup(buttons) if buttons else None
+
+    msg = await context.bot.send_message(chat_id, pad_message(f"{header}\n{body}"), reply_markup=kb)
+    context.user_data["proposal_msg_id"] = msg.message_id
+    return msg.message_id
+
+async def upsert_proposal_card(update: Update, context: ContextTypes.DEFAULT_TYPE, *, title: str, dishes: list[str], buttons: list[list[InlineKeyboardButton]] | None = None,) -> int:
+    """Ersetzt die bestehende Vorschlagskarte in-place; sendet neu, falls keine existiert."""
+    chat_id = update.effective_chat.id
+    pid = context.user_data.get("proposal_msg_id")
+
+    header = f"🥣 <u><b>{title}</b></u>"
+    lines = [format_hanging_line(escape(str(g)), bullet="‣", indent_nbsp=2, wrap_at=60)
+             for g in (dishes or [])]
+    text = pad_message(f"{header}\n" + "\n".join(lines))
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if isinstance(pid, int):
+        try:
+            await context.bot.edit_message_text(chat_id=chat_id, message_id=pid, text=text, reply_markup=kb)
+            return pid
+        except Exception:
+            # Fallback: alte Karte weg und neu senden
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+            except Exception:
+                pass
+
+    msg = await context.bot.send_message(chat_id, text, reply_markup=kb)
+    context.user_data["proposal_msg_id"] = msg.message_id
+    return msg.message_id
+
+
+
+async def ask_beilagen_yes_no(anchor_msg, context: ContextTypes.DEFAULT_TYPE) -> int:
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ja", callback_data="ask_yes"),
+         InlineKeyboardButton("Nein", callback_data="ask_no")]
+    ])
+    m = await anchor_msg.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
+    track_msg(context, "flow_msgs", m.message_id)
+    return ASK_BEILAGEN
+
+def build_beilage_keyboard(allowed_codes: set[int], selected: list[int]) -> InlineKeyboardMarkup:
+    dfb = df_beilagen.copy()
+    dfb["Nummer"] = dfb["Nummer"].astype(int)
+    btns = []
+    for _, r in dfb[dfb["Nummer"].isin(allowed_codes)].iterrows():
+        code = int(r["Nummer"])
+        name = str(r["Beilagen"])
+        label = f"{'✅ ' if code in selected else ''}{name}"
+        btns.append(InlineKeyboardButton(label, callback_data=f"beilage_{code}"))
+    rows = distribute_buttons_equally(btns, max_per_row=3)
+    footer = InlineKeyboardButton("✔️ Fertig" if selected else "Weiter ohne Beilage", callback_data="beilage_done")
+    rows.append([footer])
+    return InlineKeyboardMarkup(rows)
+
+EFFORT_LABELS = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+def effort_label(lvl: int | None) -> str:
+    return EFFORT_LABELS.get(lvl or 0, "")
+
+def normalize_link(v: str) -> str:
+    v = (v or "").strip()
+    if not v:
+        return ""
+    return v if v.startswith(("http://","https://")) else "https://" + v
+
+
+async def reset_flow_state(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    reset_session: bool = True,
+    delete_messages: bool = True,
+    only_keys: list[str] | None = None,
+    skip_keys: list[str] | None = None,
+) -> None:
+    """
+    Zentraler Hook, um UI-Nachrichten zu löschen und ephemere User-States zu resetten.
+    - reset_session=True: löscht die Gerichtesession (menus/beilagen) aus 'sessions' + Persistenz.
+    - delete_messages=True: löscht getrackte Nachrichten aus den bekannten Message-Listen.
+    - only_keys: löscht NUR die angegebenen Message-Listen (keine ephemeren States).
+    - skip_keys: überspringt bestimmte Message-Listen.
+    """
+    uid = str(update.effective_user.id) if update.effective_user else None
+    chat_id = update.effective_chat.id if update.effective_chat else None
+
+    # 1) Nachrichtenlisten: bekannte Keys
+    msg_keys_all = ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs", "export_msgs"]
+    if only_keys is not None:
+        msg_keys = [k for k in msg_keys_all if k in only_keys]
+        clear_ephemeral = False  # bei only_keys keine States löschen
+    else:
+        msg_keys = msg_keys_all.copy()
+        clear_ephemeral = True
+    if skip_keys:
+        msg_keys = [k for k in msg_keys if k not in skip_keys]
+
+    if delete_messages and chat_id is not None:
+        for key in msg_keys:
+            ids = context.user_data.get(key, [])
+            for mid in ids:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+            context.user_data[key] = []
+
+    # 2) Ephemere User-States (nur wenn kein only_keys gesetzt ist)
+    if clear_ephemeral:
+        EPHEMERAL_KEYS = {
+            # Menü-Anzahl & Aufwand
+            "menu_count_sel", "menu_count", "menu_count_page", "aufwand_verteilung",
+            # Personen
+            "temp_persons", "persons_page", "personen",
+            # Beilagen/Mehrfachauswahl
+            "allowed_beilage_codes", "menu_list", "to_process", "menu_idx",
+            # Tauschen
+            "swap_candidates", "swapped_indices",
+            # QuickOne
+            "quickone_remaining", "quickone_side_pools",
+            # Favoriten-Flows
+            "fav_total", "fav_del_sel", "fav_sel_sel", "fav_add_sel",
+            # Profil-Wizard
+            "new_profile",
+            # Ergebnis/Exporte
+            "final_list", "einkaufsliste_df", "kochliste_text",
+        }
+        for k in EPHEMERAL_KEYS:
+            context.user_data.pop(k, None)
+
+    # 3) Gerichtesession (menus/beilagen) & Persistenz
+    if reset_session and uid and (uid in sessions or update.effective_chat):
+        try:
+            if uid in sessions:
+                del sessions[uid]
+            if update.effective_chat:
+                ckey = chat_key(int(update.effective_chat.id))
+                store_delete_session(ckey)
+        except Exception:
+            pass
+
+# ___________________________
 
 async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low") -> int:
     """
-    Paginiertes Auswahl-Keyboard für 1–6 / 7–12 Personen.
-    Nur bei den Navigation-Callback-Daten wird die Inline-ReplyMarkup editiert,
-    ansonsten immer eine neue Nachricht gesendet.
+    Paginiertes Auswahl-Keyboard für 1–6 / 7–12 Personen mit 'Fertig'.
+    Zahl klickt nur Auswahl (✅), weiter geht es erst mit 'Fertig'.
     """
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-    data = query.data if query else None
+    q = update.callback_query
+    data = q.data if q else None
 
-    # 1) Nur bei echten Page-Wechseln editen
-    if query and data in ("persons_page_low", "persons_page_high"):
-        # Seite umschalten
+    # Fresh entry (kein reiner Seitenwechsel): alte Auswahl löschen
+    if not (q and (data in ("persons_page_low", "persons_page_high"))):
+        context.user_data.pop("temp_persons", None)
+        context.user_data["persons_page"] = "low"
+
+    # State: Seite & Auswahl (temp_persons hält die Auswahl bis 'Fertig')
+    sel = context.user_data.get("temp_persons")
+    if data in ("persons_page_low", "persons_page_high"):
         page = "high" if data == "persons_page_high" else "low"
+    context.user_data["persons_page"] = page
 
-        # Buttons je nach Seite
-        if page == "low":
-            nums = list(range(1, 7))
-            nav_label, nav_data = "Mehr ➡️", "persons_page_high"
-        else:
-            nums = list(range(7, 13))
-            nav_label, nav_data = "⬅️ Weniger", "persons_page_low"
+    if page == "low":
+        nums = range(1, 7)
+        nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="persons_page_high")
+    else:
+        nums = range(7, 13)
+        nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="persons_page_low")
 
-        # Grid-Layout: 6 Zahlen in einer Zeile + Navigations-Button darunter
-        num_buttons = [
-            [InlineKeyboardButton(str(n), callback_data=f"persons_{n}") for n in nums]
-        ]
-        num_buttons.append([InlineKeyboardButton(nav_label, callback_data=nav_data)])
+    row_numbers = [
+        InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
+        for n in nums
+    ]
+    done_label = "✔️ Weiter" if isinstance(sel, int) else "(wähle oben)"
+    footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="persons_done")]
+    kb = InlineKeyboardMarkup([row_numbers, footer])
+    prompt = "Für wie viele Personen soll die Einkaufs- und Kochliste erstellt werden?"
 
-        kb = InlineKeyboardMarkup(num_buttons)
-
-        # Nur das Keyboard editieren
-        await query.edit_message_reply_markup(reply_markup=kb)
+    # a) Bei echtem Seitenwechsel nur das Keyboard updaten
+    if q and data in ("persons_page_low", "persons_page_high"):
+        await q.edit_message_reply_markup(reply_markup=kb)
         return PERSONS_SELECTION
 
-    # 2) Andernfalls (Erstversand oder Aufruf von menu_confirm_cb etc.) neu senden
-    # Immer mit der "low"-Seite starten
-    nums = list(range(1, 7))
-    nav_label, nav_data = "Mehr ➡️", "persons_page_high"
-    num_buttons = [
-        [InlineKeyboardButton(str(n), callback_data=f"persons_{n}") for n in nums]
-    ]
-    num_buttons.append([InlineKeyboardButton(nav_label, callback_data=nav_data)])
-    
-    kb = InlineKeyboardMarkup(num_buttons)
-
-    msg = await update.effective_message.reply_text(
-        "Für wieviel Personen soll die Einkaufs- und Kochliste erstellt werden?",
-        reply_markup=kb
-    )
+    # b) Initial/sonst: neue Nachricht senden
+    msg = await update.effective_message.reply_text(prompt, reply_markup=kb)
     context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     return PERSONS_SELECTION
-
-
 
 
 
@@ -559,35 +1093,6 @@ async def ask_for_persons(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 # ===================================== FAVORITEN–HELPER =====================================
 # ============================================================================================
 
-
-def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 8 pro Zeile), gleichmäßig auf Zeilen verteilt + 'Fertig'."""
-    btns = [
-        InlineKeyboardButton(
-            f"{'✅ ' if i in selected else ''}{i}",
-            callback_data=f"fav_del_{i}"
-        )
-        for i in range(1, total + 1)
-    ]
-    rows = distribute_buttons_equally(btns, max_per_row=7)
-
-    rows.append([InlineKeyboardButton("Fertig", callback_data="fav_del_done")])
-    return InlineKeyboardMarkup(rows)
-
-
-def build_fav_add_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Buttons (max. 7 pro Zeile), gleichmäßig auf Zeilen verteilt + 'Fertig'."""
-    btns = [
-        InlineKeyboardButton(
-            f"{'✅ ' if i in selected else ''}{i}",
-            callback_data=f"fav_add_{i}"
-        )
-        for i in range(1, total + 1)
-    ]
-    rows = distribute_buttons_equally(btns, max_per_row=7)
-
-    rows.append([InlineKeyboardButton("Fertig", callback_data="fav_add_done")])
-    return InlineKeyboardMarkup(rows)
 
 #gerichte zuteilen, falls aus favoriten gerichte selektiert
 def get_random_gerichte(profile, filters, aufwandsliste, block=None, limit=3, mode="session"):
@@ -623,45 +1128,123 @@ def get_random_gerichte(profile, filters, aufwandsliste, block=None, limit=3, mo
 
 def distribute_buttons_equally(buttons, max_per_row=7):
     total = len(buttons)
-    rows_needed = math.ceil(total / max_per_row)
+    if total == 0:
+        return []  # <- verhindert Division durch 0
 
+    rows_needed = math.ceil(total / max_per_row)
     per_row = total // rows_needed
     extra = total % rows_needed
 
-    rows = []
-    index = 0
+    rows, index = [], 0
     for r in range(rows_needed):
         count = per_row + (1 if r < extra else 0)
         rows.append(buttons[index:index + count])
         index += count
     return rows
 
+
+def _build_numbers_keyboard(prefix: str, total: int, selected: set[int], max_per_row: int, done_cb: str, *, done_label_empty: str = "Fertig", done_label_some:  str = "✔️ Fertig",) -> InlineKeyboardMarkup:
+    """
+    Generischer Zahlen-Keyboard-Builder.
+    prefix:  'fav_del_' | 'fav_add_' | 'fav_sel_'
+    done_cb: 'fav_add_done' | 'fav_sel_done' | 'fav_del_done'
+    """
+    btns = [
+        InlineKeyboardButton(
+            f"{'✅ ' if i in selected else ''}{i}",
+            callback_data=f"{prefix}{i}"
+        )
+        for i in range(1, total + 1)
+    ]
+    rows = distribute_buttons_equally(btns, max_per_row=max_per_row)
+    footer_label = done_label_some if selected else done_label_empty
+    rows.append([InlineKeyboardButton(footer_label, callback_data=done_cb)])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_fav_numbers_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
+    """Zahlen-Buttons (max. 8 pro Zeile) für Entfernen-Modus + 'Zurück'/'✔️ Fertig'."""
+    return _build_numbers_keyboard(prefix="fav_del_", total=total, selected=selected, max_per_row=7, done_cb="fav_del_done", done_label_empty="Zurück",done_label_some="✔️ Fertig")
+
+
+# NEW — Text abkürzen (ASCII-„...“), feste maximale Länge
+def _truncate_label(text: str, max_len: int) -> str:
+    text = str(text or "")
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[:max_len - 3].rstrip() + "..."
+
+# NEW — Einspaltige Buttons mit Gerichtsnamen (⭐ am rechten Ende, ✅ vorn bei Auswahl)
+def build_fav_add_keyboard_dishes(
+    dishes: list[str],
+    selected: set[int],
+    existing_favs: set[str],
+    max_len: int = 35
+) -> InlineKeyboardMarkup:
+    rows = []
+    for i, name in enumerate(dishes, start=1):
+        is_fav = name in existing_favs
+        avail = max_len - (1 if is_fav else 0)
+        base = _truncate_label(name, avail)
+        label = base + ("⭐" if is_fav else "")
+        if i in selected:
+            label = "✅ " + label
+        rows.append([InlineKeyboardButton(label, callback_data=f"fav_add_{i}")])
+
+    # Footer-Button: keine Auswahl → "Keines", sonst "✔️ Weiter/Fertig"
+    footer_label = "✖️ Keines" if not selected else "✔️ Fertig"
+    rows.append([InlineKeyboardButton(footer_label, callback_data="fav_add_done")])
+    return InlineKeyboardMarkup(rows)
+
+def build_menu_select_keyboard_for_sides(dishes: list[str], selected_zero_based: set[int], *, max_len: int = 35) -> InlineKeyboardMarkup:
+    """
+    Einspaltige Buttons mit Gerichtsnamen für den Beilagen-Preselect-Schritt.
+    - zeigt nur Gerichte, die überhaupt Beilagen erlauben
+    - markiert selektierte mit '✅ ' vor dem Namen
+    - Footer: 'Fertig' / '✔️ Fertig' (wenn >=1 ausgewählt)
+    Hinweis: selected_zero_based enthält 0-basierte Indizes.
+    """
+    rows = []
+    for i, name in enumerate(dishes, start=1):
+        if not allowed_sides_for_dish(name):
+            continue
+        label_base = _truncate_label(name, max_len)
+        label = ("✅ " if (i - 1) in selected_zero_based else "") + label_base
+        rows.append([InlineKeyboardButton(label, callback_data=f"select_{i}")])
+
+    footer_label = "✔️ Weiter" if selected_zero_based else "Keine Beilagen"
+    rows.append([InlineKeyboardButton(footer_label, callback_data="select_done")])
+    return InlineKeyboardMarkup(rows)
+
 # ============================================================================================
 
 async def send_main_buttons(msg):
     """Hauptmenü-Buttons erneut anzeigen (z. B. bei leerer Favoritenliste)."""
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
-        InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone")],
-        [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
-        InlineKeyboardButton("🛠️ Übersicht",     callback_data="start_setup"),
-    ]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍲 Menüvorschlag",      callback_data="start_menu")],
+        [InlineKeyboardButton("⚡ QuickOne",     callback_data="start_quickone"),
+        InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
+    ])
     await msg.reply_text(pad_message("➡️ Wähle eine Option:"), reply_markup=kb)
 
 # ============================================================================================
 
-async def send_action_menu(msg):
-    """Zeigt die drei Haupt-Export/Restart-Buttons mit Frage an."""
+async def send_action_menu(msg, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Zeigt die drei Haupt-Export/Restart-Buttons mit Frage an,
+    tracked die Nachricht (für späteres Löschen) und gibt sie zurück.
+    """
     kb = InlineKeyboardMarkup([
-        [ InlineKeyboardButton("🔖 Gerichte zu Favoriten hinzufügen",                callback_data="favoriten") ],
-        [ InlineKeyboardButton("🛒 Einkaufsliste in Bring! exportieren", callback_data="export_bring") ],
-        [ InlineKeyboardButton("📄 Als PDF exportieren",   callback_data="export_pdf")   ],
-        [ InlineKeyboardButton("🔄 Das passt so. Neustart!",             callback_data="restart")      ],
+        [InlineKeyboardButton("🔖 Gerichte zu Favoriten hinzufügen", callback_data="favoriten")],
+        [InlineKeyboardButton("🛒 Einkaufsliste in Bring! exportieren", callback_data="export_bring")],
+        [InlineKeyboardButton("📄 Als PDF exportieren", callback_data="export_pdf")],
+        [InlineKeyboardButton("🔄 Das passt so. Neustart!", callback_data="restart")],
     ])
-    await msg.reply_text(pad_message("Was möchtest Du weiter tun?"), reply_markup=kb)
-
-
-
+    out = await msg.reply_text(pad_message("Was steht als nächstes an?"), reply_markup=kb)
+    _track_export_msg(context, out.message_id)
+    return out
 
 # Load persisted data (env-aware: avoid JSON preload when Firestore is enabled)
 if (os.getenv("PERSISTENCE") or "json").strip().lower() == "firestore":
@@ -706,7 +1289,6 @@ def lade_gerichtebasis():
     return df.drop_duplicates()
 
 
-
 def lade_beilagen():
     sheet = client.open_by_key(SHEET_ID).worksheet("Beilagen")
     raw = sheet.get_all_values()[1:]       # überspringe Header
@@ -718,9 +1300,40 @@ def lade_beilagen():
     df["Nummer"] = df["Nummer"].astype(int)
     return df
 
-def parse_codes(s: str):
-    return [int(x.strip()) for x in s.split(",") if x.strip().isdigit()]
+def parse_codes(s: str) -> list[int]:
+    if s is None:
+        return []
+    return [int(m) for m in re.findall(r"\d+", str(s))]
 
+def allowed_sides_for_dish(dish: str) -> set[int]:
+    """
+    Liefert die final erlaubten Beilagen-Nummern für ein Gericht.
+    Nutzt 99/88/77 (Kategorien) korrekt und filtert 0 heraus.
+    """
+    try:
+        raw_series = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"]
+        raw = str(raw_series.iloc[0]) if not raw_series.empty else ""
+    except Exception:
+        raw = ""
+    base = [c for c in parse_codes(raw) if c != 0]
+
+    # Kategorienlisten aus df_beilagen
+    nums = df_beilagen["Nummer"].astype(int)
+    kh   = set(nums[df_beilagen["Kategorie"] == "Kohlenhydrate"].tolist())
+    gv   = set(nums[df_beilagen["Kategorie"] == "Gemüse"].tolist())
+    all_nums = set(nums.tolist())
+
+    allowed: set[int] = set()
+    if 99 in base:
+        allowed |= (kh | gv)
+    else:
+        if 88 in base:
+            allowed |= kh
+        if 77 in base:
+            allowed |= gv
+        # explizite Nummern, die real existieren
+        allowed |= set(x for x in base if x not in (88, 77, 99) and x in all_nums)
+    return allowed
 
 
 def lade_zutaten():
@@ -752,14 +1365,14 @@ def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
         cb = _cache_read_if_fresh("beilagen", ttl_sec)
         cz = _cache_read_if_fresh("zutaten",  ttl_sec)
         if cg and cb and cz:
-            print("Sheets-Cache: HIT (Firestore, frisch)")
+            logging.info("Sheets-Cache: HIT (Firestore, frisch)")
             return (
                 _compact_json_to_df(cg),
                 _compact_json_to_df(cb),
                 _compact_json_to_df(cz),
             )
         else:
-            print("Sheets-Cache: MISS/EXPIRED → lade aus Google Sheets")
+            logging.info("Sheets-Cache: MISS/EXPIRED → lade aus Google Sheets")
 
     # 2) Aus Google Sheets laden (deine bestehenden Loader)
     df_g = lade_gerichtebasis()
@@ -772,9 +1385,9 @@ def _load_sheets_via_cache(ttl_sec: int = SHEETS_CACHE_TTL_SEC):
             _cache_write("gerichte", _df_to_compact_json(df_g))
             _cache_write("beilagen", _df_to_compact_json(df_b))
             _cache_write("zutaten",  _df_to_compact_json(df_z))
-            print("Sheets-Cache: Snapshot in Firestore aktualisiert")
+            logging.info("Sheets-Cache: Snapshot in Firestore aktualisiert")
         except Exception as e:
-            print(f"⚠️ Cache-Write Fehler: {e}")
+            logging.warning("Sheets-Cache: Write-Fehler: %s", e)
 
     return df_g, df_b, df_z
 
@@ -788,6 +1401,47 @@ df_gerichte["Typ"] = (
       .fillna("2")
 )
 
+
+
+# --- Normalisierung: Typ immer als "1"/"2"/"3" ---
+df_gerichte["Typ"] = (
+    pd.to_numeric(df_gerichte["Typ"], errors="coerce")
+      .astype("Int64")
+      .map({1: "1", 2: "2", 3: "3"})
+      .fillna("2")
+)
+
+# --- Schnell-Indizes für häufige Lookups (robust) ---
+_G_COLS = ["Beilagen", "Aufwand", "Typ", "Link"]
+_present_cols = [c for c in _G_COLS if c in df_gerichte.columns]
+
+try:
+    _G_INDEX = (
+        df_gerichte
+        .set_index("Gericht")[_present_cols]
+        .to_dict(orient="index")
+    )
+except Exception as e:
+    logging.warning("Gerichte-Index konnte nicht aufgebaut werden (%s) – arbeite ohne Schnell-Index.", e)
+    _G_INDEX = {}
+
+def gi(name: str):
+    """Schneller Zugriff auf Gerichte-Zeile als dict (oder None)."""
+    try:
+        return _G_INDEX.get(name)
+    except Exception:
+        return None
+
+
+def get_aufwand_for(dish: str):
+    """Aufwand eines Gerichts als int (1/2/3) oder None."""
+    row = gi(dish)
+    if not row:
+        return None
+    try:
+        return int(pd.to_numeric(row.get("Aufwand"), errors="coerce"))
+    except Exception:
+        return None
 
 # -------------------------------------------------
 # Gerichte-Filter basierend auf Profil
@@ -907,9 +1561,6 @@ def sample_by_weight(df: pd.DataFrame, weight: int, k: int) -> pd.DataFrame:
     result = pd.concat(list(chosen.values()))
     return result.sample(frac=1).reset_index(drop=True)
 
-def choose_random_dish() -> str:
-    """Zufällig ein Gericht auswählen, ohne Filter."""
-    return df_gerichte.sample(1)["Gericht"].iloc[0]
 
 def choose_sides(codes: list[int]) -> list[int]:
     """Beilagen basierend auf Codes zufällig auswählen, ohne Fehler bei leeren Kategorien."""
@@ -958,41 +1609,65 @@ def choose_sides(codes: list[int]) -> list[int]:
 #>>>>>>>>>>>>START / SETUP
 ##############################################
 
+
+# ===== Zentrale Texte & UI für Start/Übersicht =====
+def get_welcome_text() -> str:
+    return (
+        "👋 Willkommen!\n\n"
+        "Dein Assistent für die Essensplanung steht Dir jederzeit mit leckere Kochideen zur Seite.\n\n"
+        "Ein Gericht oder mehrere für die ganze Woche? Du bestimmst Anzahl Gerichte und Personen.\n\n"
+        "Kein Fleisch? Asiatische Woche? Im Sommer lieber leicht? Erstelle ein Profil mit deinen Präferenzen.\n\n"
+        "Setze Favoriten, damit sie öfter erscheinen – oder wähle sie direkt für den Vorschlag aus.\n\n"
+        "Die sortierte Einkaufsliste spart Zeit und stellt sicher, dass beim Kochen alles da ist. Kopiere sie ins E-Mail, lade sie als PDF herunter oder exportiere sie direkt in die Bring!-App.\n\n"
+        "Viel Spass und en Guete!\n"      
+            )
+
+def get_overview_text() -> str:
+    return (
+        "<u><b>Übersicht der Befehle:</b></u>\n\n"
+        "🍲 Lass Dir leckere Gerichte vorschlagen\n\n"
+        "⚡ Ein Gericht - wenn’s schnell gehen muss\n\n"
+        "🔖 Lieblingsgerichte anzeigen\n\n"
+        #"🛠️ Nützliche Infos und Hilfen\n\n"
+        #"🔄️ Starte jederzeit neu"
+    )
+
+def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🍲 Menüvorschlag",      callback_data="start_menu")],
+        [InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
+        InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs")],
+
+        #[
+        #    InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
+        #    InlineKeyboardButton("⚡ QuickOne",  callback_data="start_quickone"),
+        #],
+        #[
+        #    InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
+        #    InlineKeyboardButton("🛠️ Übersicht", callback_data="start_setup"),
+        #    InlineKeyboardButton("🔄 Restart",   callback_data="restart_ov"),
+        #],
+    ])
+
+async def send_overview(chat_id: int, context: ContextTypes.DEFAULT_TYPE, edit_message=None):
+    text = get_overview_text()
+    kb = build_main_menu_keyboard()
+    if edit_message is not None:
+        await edit_message.edit_text(text, reply_markup=kb)
+    else:
+        await context.bot.send_message(chat_id, text, reply_markup=kb)
+
+async def send_welcome_then_overview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    # 1) Sofort: kurzer Willkommens-Text
+    await context.bot.send_message(chat_id, get_welcome_text())
+    # 2) Nach 3 Sekunden: Übersicht + Buttons
+    await asyncio.sleep(3)
+    await send_overview(chat_id, context)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Willkommen!\n"
-        "Übersicht der Befehle:\n\n"
-        "🍲 Menü – Lass Dir leckere Gerichte vorschlagen\n\n"
-        "⚡ QuickOne – Ein Gericht ohne Einschränkungen\n\n"
-        "🔖 Favoriten – Deine Favoriten\n\n"
-        "🛠️ Übersicht – Alle Funktionen\n\n"
-    )
-
-    # 2. Buttons in einer neuen Nachricht
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🍲 Menü",      callback_data="start_menu"),
-        InlineKeyboardButton("⚡QuickOne",     callback_data="start_quickone")],
-        [InlineKeyboardButton("🔖 Favoriten", callback_data="start_favs"),
-        InlineKeyboardButton("🛠️ Übersicht",     callback_data="start_setup"),
-    ]])
-    await update.message.reply_text(
-        pad_message("➡️ Wähle eine Option:"),
-        reply_markup=keyboard
-    )
-
-async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🛠 Kommandos im Menu Bot:\n"
-        "/start – Hilfe & Einführung\n"
-        "/menu – generiere Gerichtevorschläge\n"
-        "/meinefavoriten – Übersicht deiner Favoriten\n"
-        #"/meinProfil – Übersicht Deiner Favoriten\n"
-        "/status – zeigt aktuelle Gerichtewahl\n"
-        "/reset – setzt Session zurück (Favoriten bleiben)\n"
-        "/setup – zeigt alle Kommandos\n"
-        "/neustart – Startet neuen Prozess (Favoriten bleiben)\n"
-        f"\nDeine User-ID: {update.effective_user.id}"
-    )
+    await send_welcome_then_overview(update, context)
 
 async def menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/menu per Text – startet Profil-Loop"""
@@ -1005,6 +1680,8 @@ async def menu_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     # erste Message fürs spätere Cleanup merken
     context.user_data["prof_msgs"].append(sent.message_id)
+    context.user_data["prof_start_msg_id"] = sent.message_id
+
     return PROFILE_CHOICE
 
 async def menu_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1020,6 +1697,7 @@ async def menu_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=build_profile_choice_keyboard(),
     )
     context.user_data["prof_msgs"].append(sent.message_id)
+    context.user_data["prof_start_msg_id"] = sent.message_id
     return PROFILE_CHOICE
 
 
@@ -1028,23 +1706,40 @@ async def start_setup_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     text = (
-        "🛠 Kommandos im Menu Bot:\n"
-        "/start – Hilfe & Einführung\n"
-        "/menu – generiere Gerichtevorschläge\n"
-        "/meinefavoriten – Übersicht Deiner Favoriten\n"
-        #"/meinProfil – Übersicht Deiner Favoriten\n"
-        "/status – zeigt aktuelle Auswahl\n"
-        "/reset – setzt Session zurück (Favoriten bleiben)\n"
-        "/setup – zeigt alle Kommandos\n"
-        "/neustart – neuer Prozess\n"
-        f"\nDeine User-ID: {update.effective_user.id}"
+        "🛠 Übersicht:\n"
+        "Plane schnell und unkompliziert leckere Gerichte – für heute oder die ganze Woche.\n\n"
+        "Die sortierte Einkaufsliste spart Zeit und stellt sicher, dass beim Kochen alles da ist.\n\n"
+        "Der Ablauf ist intuitiv und einfach gestaltet. Über den Menü-Button unten links kannst Du jederzeit neu starten oder alles zurücksetzen:\n\n"
+        "‣ /restart – Unterbreche eine aktuelle Session und starte von vorne\n\n"
+        "‣ /reset – Setze alle Einstellungen zurück. Dein Profil, deine Favoriten und die aktuelle Gerichteselektion verschwinden\n"
+        f"\nDeine User-ID: {update.effective_user.id}"   
     )
+    
     await q.message.reply_text(
         text,
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("Alles klar", callback_data="setup_ack")
         ]])
     )
+
+async def setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setup zeigt dieselbe Übersicht wie der Button '🛠️ Übersicht'
+    und verwendet denselben 'Alles klar'-Dismiss-Button.
+    """
+    chat_id = update.effective_chat.id
+    text = (
+        "🛠 Übersicht:\n"
+        "Plane schnell und unkompliziert leckere Gerichte – für heute oder die ganze Woche.\n\n"
+        "Die sortierte Einkaufsliste spart Zeit und stellt sicher, dass beim Kochen alles da ist.\n\n"
+        "Der Ablauf ist intuitiv und einfach gestaltet. Über den Menü-Button unten links kannst Du jederzeit neu starten oder alles zurücksetzen:\n\n"
+        "‣ /restart – Unterbreche eine aktuelle Session und starte von vorne\n\n"
+        "‣ /reset – Setze alle Einstellungen zurück. Dein Profil, deine Favoriten und die aktuelle Gerichteselektion verschwinden\n"
+        f"\nDeine User-ID: {update.effective_user.id}"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Alles klar", callback_data="setup_ack")]])
+    await context.bot.send_message(chat_id, text, reply_markup=kb)
+
 
 async def setup_ack_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Löscht die Setup-Übersicht, wenn auf ‚Alles klar‘ geklickt wird."""
@@ -1090,32 +1785,90 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== 1)  Bestehendes Profil =========================================
     if choice == "prof_exist":
         if ensure_profile_loaded(uid):
-            # Profil vorhanden → Wizard-Messages weg, sofort zum alten Flow
-            await cleanup_prof_loop(context, q.message.chat_id)
-            return await start_menu_count_flow(update, context)
+            # In-place Edit der Startfrage → "Wie viele Gerichte...?"
+            context.user_data.pop("menu_count_sel", None)
+            context.user_data["menu_count_page"] = "low"
 
+            kb = build_menu_count_inline_kb(None, "low")
+            try:
+                await q.message.edit_text(
+                    pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                    reply_markup=kb
+                )
+            except Exception:
+                # Fallback: wenn Edit nicht möglich, neue Nachricht senden
+                msg = await q.message.reply_text(
+                    pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                    reply_markup=kb
+                )
+                # Tracking: neu gesendete Nachricht in flow_msgs
+                context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+            else:
+                # Tracking: die ehem. Startfrage von prof_msgs → flow_msgs verschieben
+                try:
+                    context.user_data.get("prof_msgs", []).remove(q.message.message_id)
+                except Exception:
+                    pass
+                context.user_data.setdefault("flow_msgs", []).append(q.message.message_id)
+                # Startfrage-ID aufräumen, weil jetzt Flow-Nachricht
+                if context.user_data.get("prof_start_msg_id") == q.message.message_id:
+                    context.user_data.pop("prof_start_msg_id", None)
 
-        # Kein Profil ⇒ Hinweis + Wizard starten
+            return MENU_COUNT
+
+        # Kein Profil ⇒ Hinweis + Wizard starten (unverändert)
+        async def send_and_log(text: str, *, store_id: bool = True, **kwargs):
+            msg = await q.message.reply_text(text, **kwargs)
+            if store_id:
+                context.user_data.setdefault("prof_msgs", []).append(msg.message_id)
+            return msg
+
         await send_and_log("Es besteht noch kein Profil. Erstelle eines!")
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
-            "Ernährungsstil:",
+            pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard()
         )
         return PROFILE_NEW_A
 
+
     # ===== 2)  Ohne Einschränkung =========================================
     if choice == "prof_nolim":
-        # Wizard-Nachrichten löschen (falls vorhanden) und direkt weiter
-        await cleanup_prof_loop(context, q.message.chat_id)
-        return await start_menu_count_flow(update, context)
+        # In-place Edit der Startfrage → "Wie viele Gerichte...?"
+        context.user_data.pop("menu_count_sel", None)
+        context.user_data["menu_count_page"] = "low"
 
+        kb = build_menu_count_inline_kb(None, "low")
+        try:
+            await q.message.edit_text(
+                pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                reply_markup=kb
+            )
+        except Exception:
+            # Fallback: wenn Edit nicht möglich, neue Nachricht senden
+            msg = await q.message.reply_text(
+                pad_message("Wie viele Gerichte soll ich vorschlagen?"),
+                reply_markup=kb
+            )
+            context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+        else:
+            # Tracking: die ehem. Startfrage von prof_msgs → flow_msgs verschieben
+            try:
+                context.user_data.get("prof_msgs", []).remove(q.message.message_id)
+            except Exception:
+                pass
+            context.user_data.setdefault("flow_msgs", []).append(q.message.message_id)
+            # Startfrage-ID aufräumen, weil jetzt Flow-Nachricht
+            if context.user_data.get("prof_start_msg_id") == q.message.message_id:
+                context.user_data.pop("prof_start_msg_id", None)
+
+        return MENU_COUNT
 
     # ===== 3)  Neues Profil ===============================================
     if choice == "prof_new":
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
-            "Ernährungsstil:",
+            pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard()
         )
         return PROFILE_NEW_A
@@ -1126,7 +1879,6 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_and_log(
                 profile_overview_text(profiles[uid]),
                 reply_markup=build_profile_overview_keyboard(),
-                parse_mode="Markdown"
             )
             return PROFILE_OVERVIEW
 
@@ -1134,7 +1886,7 @@ async def profile_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_and_log("Es besteht noch kein Profil. Erstelle eines!")
         context.user_data["new_profile"] = {"styles": set()}
         await send_and_log(
-            "Ernährungsstil:",
+            pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard()
         )
         return PROFILE_NEW_A
@@ -1152,7 +1904,7 @@ async def profile_new_a_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # weiter zu (b)
     await q.message.edit_text(
-        pad_message("Küche auswählen (Mehrfachauswahl möglich):"),
+        pad_message("Küche auswählen (Mehrfachauswahl möglich oder 'Alles'):"),
         reply_markup=build_style_keyboard(set())
     )
     return PROFILE_NEW_B
@@ -1232,7 +1984,7 @@ async def profile_new_c_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    choice = q.data  # prof_overwrite / prof_next
+    choice = q.data  # 'prof_overwrite' oder 'prof_back'
 
     if choice == "prof_overwrite":
         # Wizard neu starten
@@ -1241,86 +1993,153 @@ async def profile_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
             pad_message("Ernährungsstil:"),
             reply_markup=build_restriction_keyboard(),
         )
-        context.user_data["prof_msgs"].append(sent.message_id)
+        if sent.message_id not in context.user_data.get("prof_msgs", []):
+            context.user_data.setdefault("prof_msgs", []).append(sent.message_id)
         return PROFILE_NEW_A
 
-    # ------- Weiter → alten Menü-Flow starten -------------------------
-    await cleanup_prof_loop(context, q.message.chat_id)
-    return await start_menu_count_flow(update, context)
+    if choice == "prof_back":
+        # Alle Profil-/Wizard-Nachrichten löschen, aber die Startfrage stehen lassen
+        await cleanup_prof_loop_except_start(context, q.message.chat.id)
+        # Zurück in den Auswahl-State; die (bestehende) Startfrage bleibt sichtbar/benutzbar
+        return PROFILE_CHOICE
 
+    # Fallback (sollte nie erreicht werden)
+    return PROFILE_OVERVIEW
+
+
+def build_menu_count_inline_kb(selected: int | None, page: str = "low") -> InlineKeyboardMarkup:
+    if page == "low":
+        nums = range(1, 7)
+        nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
+    else:
+        nums = range(7, 13)
+        nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
+
+    row_numbers = [
+        InlineKeyboardButton(f"{n} ✅" if selected == n else f"{n}", callback_data=f"menu_count_{n}")
+        for n in nums
+    ]
+    done_label = "✔️ Weiter" if isinstance(selected, int) else "(wähle oben)"
+    footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
+    return InlineKeyboardMarkup([row_numbers, footer])
 
 async def ask_menu_count(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str = "low"):
-    """Zeigt dem Nutzer Menümengen zur Auswahl (1–12) mit Umschaltung."""
+    """Zahlenauswahl 1–12 mit Umschaltung und 'Fertig'. Auswahl nur markieren (✅),
+    weiter geht es erst mit 'Fertig'. Der 'Fertig'-Button zeigt einen grünen Haken,
+    sobald eine Zahl gewählt ist."""
+    q = update.callback_query
+    if not (q and (q.data in ("menu_count_page_high", "menu_count_page_low"))):
+        context.user_data.pop("menu_count_sel", None)
+    data = q.data if q else None
 
+    # State: aktuelle Seite & Auswahl merken
+    sel = context.user_data.get("menu_count_sel")
+    if data in ("menu_count_page_high", "menu_count_page_low"):
+        page = "high" if data == "menu_count_page_high" else "low"
+    context.user_data["menu_count_page"] = page
+
+    # Zahlen & Navigation je Seite
     if page == "low":
-        count_buttons = [InlineKeyboardButton(str(i), callback_data=f"menu_count_{i}") for i in range(1, 7)]
-        nav_button = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
+        nums = range(1, 7)
+        nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
     else:
-        count_buttons = [InlineKeyboardButton(str(i), callback_data=f"menu_count_{i}") for i in range(7, 13)]
-        nav_button = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
+        nums = range(7, 13)
+        nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
 
-    rows = [count_buttons]
-    rows.append([nav_button])
-    kb = InlineKeyboardMarkup(rows)
+    row_numbers = [
+        InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
+        for n in nums
+    ]
+    done_label = "✔️ Weiter" if isinstance(sel, int) else "(wähle oben)"
+    footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
+    kb = InlineKeyboardMarkup([row_numbers, footer])
+    text = pad_message("Wie viele Gerichte soll ich vorschlagen?")
 
-    text = "Wie viele Menüs möchtest du?"
+    # a) Bei echtem Seitenwechsel: nur ReplyMarkup editen
+    if q and data in ("menu_count_page_high", "menu_count_page_low"):
+        await q.edit_message_reply_markup(reply_markup=kb)
+        return MENU_COUNT
 
-    if update.callback_query:
-        data = update.callback_query.data
-        if data in ["menu_count_page_high", "menu_count_page_low"]:
-            # Navigation: Editiere vorhandene Nachricht
-            await update.callback_query.message.edit_text(text, reply_markup=kb)
-        else:
-            # Kein Navigationsevent: sende neu (z. B. Ersteintritt)
-            msg = await update.callback_query.message.reply_text(text, reply_markup=kb)
-            context.user_data["flow_msgs"] = [msg.message_id]
-
+    # b) Initial oder sonst: Nachricht mit Tastatur senden/editen (Layout bleibt gleich)
+    if q:
+        msg = await q.message.reply_text(text, reply_markup=kb)
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     elif update.message:
         msg = await update.message.reply_text(text, reply_markup=kb)
-        context.user_data["flow_msgs"] = [msg.message_id]
-
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
     else:
         chat_id = update.effective_chat.id
         msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-        context.user_data["flow_msgs"] = [msg.message_id]
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+
+    return MENU_COUNT
+
+
+async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data
+
+    # 1) Seitenwechsel
+    if data in ("menu_count_page_high", "menu_count_page_low"):
+        return await ask_menu_count(update, context, page="high" if data.endswith("high") else "low")
+
+    # 2) Zahl angeklickt -> nur markieren (✅), nicht fortfahren
+    if data.startswith("menu_count_") and data != "menu_count_done":
+        try:
+            sel = int(data.rsplit("_", 1)[-1])
+        except ValueError:
+            return MENU_COUNT
+        context.user_data["menu_count_sel"] = sel
+
+        # Tastatur mit ✅ neu aufbauen (Layout unverändert)
+        page = context.user_data.get("menu_count_page", "low")
+        if page == "low":
+            nums = range(1, 7)
+            nav_btn = InlineKeyboardButton("Mehr ➡️", callback_data="menu_count_page_high")
+        else:
+            nums = range(7, 13)
+            nav_btn = InlineKeyboardButton("⬅️ Weniger", callback_data="menu_count_page_low")
+
+        row_numbers = [
+            InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"menu_count_{n}")
+            for n in nums
+        ]
+        done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
+        footer = [nav_btn, InlineKeyboardButton(done_label, callback_data="menu_count_done")]
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
+        return MENU_COUNT
+
+    # 3) Fertig -> jetzt geht's weiter
+    if data == "menu_count_done":
+        sel = context.user_data.get("menu_count_sel")
+        if not isinstance(sel, int):
+            await q.answer("Bitte zuerst eine Zahl auswählen.", show_alert=True)
+            return MENU_COUNT
+
+        context.user_data["menu_count"] = sel
+        context.user_data["aufwand_verteilung"] = {"light": 0, "medium": 0, "heavy": 0}
+        await q.message.edit_text(
+            f"Du suchst <b>{sel}</b> Gerichte 👍\n\nDefiniere deren Aufwand:",
+            reply_markup=build_aufwand_keyboard(context.user_data["aufwand_verteilung"], sel)
+        )
+        return MENU_AUFWAND
 
     return MENU_COUNT
 
 
 
-
-
-
-async def menu_count_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "menu_count_page_high":
-        return await ask_menu_count(update, context, page="high")
-    elif data == "menu_count_page_low":
-        return await ask_menu_count(update, context, page="low")
-    elif data.startswith("menu_count_"):
-        try:
-            count = int(data.split("_")[-1])
-        except ValueError:
-            return MENU_COUNT
-
-        context.user_data["menu_count"] = count
-        context.user_data["aufwand_verteilung"] = {"light": 0, "medium": 0, "heavy": 0}
-        await query.message.edit_text(
-            f"Du suchst *{count}* Gerichte ✅\nDefiniere deren Aufwand:",
-            reply_markup=build_aufwand_keyboard(context.user_data["aufwand_verteilung"], count)
-        )
-        return MENU_AUFWAND
-
-
-
 async def start_menu_count_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Startet den neuen Menü-Auswahl-Flow mit Buttons."""
-    await cleanup_prof_loop(context, update.effective_chat.id)
+    """Startet den Menü-Auswahl-Flow (1–12) und setzt vorher UI & lokale Auswahl zurück."""
+    # Nur UI-Messages der Start-/Profil-Phase löschen, Session behalten
+    await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs", "prof_msgs"])
 
-    return await ask_menu_count(update, context)
+    # Auswahl & Seite sicher zurücksetzen
+    context.user_data.pop("menu_count_sel", None)
+    context.user_data.pop("menu_count", None)
+    context.user_data["menu_count_page"] = "low"
+
+    return await ask_menu_count(update, context, page="low")
 
 
 async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1329,6 +2148,8 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Beispiel: 4 (2,1,1)
     """
     try:
+        final_gerichte: list[str] = []
+        final_aufwand:  list[int] = []        
         text = update.message.text.strip()
         user_id = str(update.message.from_user.id)
 
@@ -1346,9 +2167,10 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "fav_selection" in context.user_data:
             selected = context.user_data.pop("fav_selection")
             profile = profiles.get(user_id)
+            # Profil ist optional; ohne Profil = keine Einschränkung
             if not profile:
-                await update.message.reply_text("⚠️ Du hast noch kein Profil angelegt.")
-                return MENU_PROFILE
+                profile = None  # apply_profile_filters() kommt damit klar
+
 
             filters = context.user_data.get("filters", {})
             aufwand_wunsch = [1]*a1 + [2]*a2 + [3]*a3
@@ -1427,51 +2249,17 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             persist_session(update)
 
 
-            if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
-                # Extrahiere Zusatzinfos zu den gewählten Gerichten
-                gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(final_gerichte)]
-
-                # Aufwand-Verteilung
-                aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
-                aufwand_text = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
-
-                # Küche-Verteilung
-                kitchen_counter = Counter(gewaehlte_gerichte["Küche"])
-                kitchen_text = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
-
-                # Art-Verteilung
-                typ_counter = Counter(gewaehlte_gerichte["Typ"])
-                typ_text = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
-
-                # Einschränkung-Verteilung
-                einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
-                einschr_text = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
-
-                # Erweiterte Debug-Nachricht zusammenbauen
-                debug_msg = (
-                    f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-                    f"\n🎨 Küche-Verteilung: {kitchen_text}"
-                    f"\n⚙️ Typ-Verteilung: {typ_text}"
-                    f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
-                )
-                msg_debug = await update.message.reply_text(debug_msg)
-                context.user_data["flow_msgs"].append(msg_debug.message_id)
-
-
-            reply = "🥣 Deine Menü-Auswahl:\n" + "\n".join(f"{i+1}. {g}" for i, g in enumerate(final_gerichte))
-            msg1 = await update.message.reply_text(reply)
-            context.user_data["flow_msgs"].append(msg1.message_id)
-
-            confirm_kb = InlineKeyboardMarkup([[  
-                InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
-                InlineKeyboardButton("Nein", callback_data="confirm_no"),
-            ]])
-            msg2 = await update.message.reply_text(
-                pad_message("Passen diese Gerichte?"), reply_markup=confirm_kb
+            await render_proposal_with_debug(
+                update, context,
+                title="Vorschlag:",
+                dishes=final_gerichte,
+                buttons=[
+                    [InlineKeyboardButton("Passt", callback_data="confirm_yes"),
+                     InlineKeyboardButton("Austauschen", callback_data="confirm_no")]
+                ],
+                replace_old=True
             )
-            context.user_data["flow_msgs"].append(msg2.message_id)
             return ASK_CONFIRM
-
 
 
 
@@ -1578,51 +2366,20 @@ async def menu_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sessions[user_id] = {"menues": ausgewaehlt, "aufwand": aufwand_liste}
         persist_session(update)
 
-        if show_debug_for(update):                                  #nur für ADMIN ersichtlich, as specified in def show_debug_for
-            # Extrahiere Zusatzinfos zu den gewählten Gerichten
-            gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(ausgewaehlt)]
-
-            # Aufwand-Verteilung
-            aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
-            aufwand_text = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
-
-            # Küche-Verteilung
-            kitchen_counter = Counter(gewaehlte_gerichte["Küche"])
-            kitchen_text = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
-
-            # Typ-Verteilung
-            typ_counter = Counter(gewaehlte_gerichte["Typ"])
-            typ_text = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
-
-            # Ernährungsstil-Verteilung
-            einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
-            einschr_text = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
-
-            # Erweiterte Debug-Nachricht zusammenbauen
-            debug_msg = (
-                f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-                f"\n🎨 Küche-Verteilung: {kitchen_text}"
-                f"\n⚙️ Typ-Verteilung: {typ_text}"
-                f"\n🥗 Ernährungsstil-Verteilung: {einschr_text}"
-            )
-            msg_debug = await update.message.reply_text(debug_msg)
-            context.user_data["flow_msgs"].append(msg_debug.message_id)
-
-
-        reply = "🥣 Deine Gerichte:\n" + "\n".join(f"{i+1}. {g}" for i, g in enumerate(ausgewaehlt))
-        # Nachricht 1 senden + tracken
-        msg1 = await update.message.reply_text(pad_message(reply))
-        context.user_data["flow_msgs"].append(msg1.message_id)
-
-        confirm_kb = InlineKeyboardMarkup([[  
-            InlineKeyboardButton("Ja",   callback_data="confirm_yes"),
-            InlineKeyboardButton("Nein", callback_data="confirm_no"),
-        ]])
-        # Nachricht 2 senden + tracken
-        msg2 = await update.message.reply_text(pad_message("Passen diese Gerichte?"), reply_markup=confirm_kb)
-        context.user_data["flow_msgs"].append(msg2.message_id)
-
+        await render_proposal_with_debug(
+            update, context,
+            title="Vorschlag:",
+            dishes=ausgewaehlt,
+            buttons=[
+                [InlineKeyboardButton("Passt", callback_data="confirm_yes"),
+                 InlineKeyboardButton("Austauschen", callback_data="confirm_no")]
+            ],
+            replace_old=True
+        )
         return ASK_CONFIRM
+
+
+
 
 
     except Exception as e:
@@ -1667,69 +2424,34 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     chat_id = query.message.chat.id
     uid     = str(query.from_user.id)
 
+    # CODE START — menu_confirm_cb : confirm_yes ohne Ja/Nein-Umschalten
     if query.data == "confirm_yes":
-        # 1) Feedback setzen
-        await mark_yes_no(query, True, "confirm_yes", "confirm_no")
-
-        # 2) Nur die Bestätigungs-Nachricht löschen
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
-                pass
+        # Buttons der Vorschlagskarte sofort entfernen (kein Umschalten auf "Ja/Nein")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
         # 3) Menüs und Beilagen-fähige Menüs ermitteln
         menus = sessions[uid]["menues"]
-        side_menus = []
-        for idx, dish in enumerate(menus):
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = [c for c in parse_codes(raw) if c != 0]
-            if codes:
-                side_menus.append(idx)
+        side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
-        # 4a) 0 Beilagen-Menüs: überspringen → finale Übersicht + Personen
+        # erst jetzt: wenn KEINE Beilagen möglich sind -> direkt weiter, ohne Debug
         if not side_menus:
-            # • alle bisherigen Nachrichten löschen
-            for mid in context.user_data.get("flow_msgs", []):
-                try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-                except:
-                    pass
-            context.user_data["flow_msgs"].clear()
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
+    
+        await render_beilage_precheck_debug(update, context, menus, prefix="DEBUG Beilagenvorprüfung:")
 
-            # • finale Übersicht
-            text = "🥣 Deine finale Liste:\n"
-            for dish in menus:
-                nums       = sessions[uid].get("beilagen", {}).get(dish, [])
-                side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"- {format_dish_with_sides(dish, side_names)}\n"
-            msg = await query.message.reply_text(pad_message(text))
-            context.user_data["flow_msgs"].append(msg.message_id)
-
-            # • direkt Personen-Frage
-            return await ask_for_persons(update, context)
-
-        # 4b) Mindestens ein Gericht mit Beilagen → immer erst die Ja/Nein-Frage
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="ask_yes"),
-            InlineKeyboardButton("Nein", callback_data="ask_no"),
-        ]])
-        msg = await query.message.reply_text(pad_message("Möchtest du Beilagen hinzufügen?"), reply_markup=kb)
-        context.user_data["flow_msgs"].append(msg.message_id)
-        return ASK_BEILAGEN
+        # 4b) >0 Beilagen-Menüs: zuerst fragen, ob Beilagen überhaupt gewünscht sind
+        return await ask_beilagen_yes_no(query.message, context)
+    
 
     if query.data == "confirm_no":
-        await mark_yes_no(query, False, "confirm_yes", "confirm_no")
-        # nur die Bestätigungs-Nachricht löschen
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
-                pass
+        # Buttons der Vorschlagskarte sofort entfernen (kein Umschalten auf "Ja/Nein")
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
         # Tausche-Loop starten
         context.user_data["swap_candidates"] = set()
@@ -1738,14 +2460,9 @@ async def menu_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data["flow_msgs"].append(msg.message_id)
         return TAUSCHE_SELECT
 
+
+
     return ConversationHandler.END
-
-
-
-
-
-
-
 
 
 async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1755,33 +2472,52 @@ async def persons_selection_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 1) Seitenwechsel
     if data in ("persons_page_low", "persons_page_high"):
-        return await ask_for_persons(update, context, page="high" if data=="persons_page_high" else "low")
+        return await ask_for_persons(update, context, page="high" if data == "persons_page_high" else "low")
 
-    # 2) Echte Personenzahl gewählt
-    if data.startswith("persons_"):
-        # a) alte Frage-Nachricht löschen
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=last_id
-                )
-            except:
-                pass
+    # 2) Zahl gewählt -> nur markieren (✅), noch NICHT weiter
+    if data.startswith("persons_") and data != "persons_done":
+        try:
+            sel = int(data.split("_")[1])
+        except Exception:
+            return PERSONS_SELECTION
 
-        # b) Auswahl speichern
-        count = int(data.split("_")[1])
-        context.user_data["temp_persons"] = count
+        context.user_data["temp_persons"] = sel
 
-        # c) Weiter zum Abschluss-Input
+        # Tastatur mit Haken neu aufbauen (Layout unverändert)
+        page = context.user_data.get("persons_page", "low")
+        if page == "low":
+            nums = list(range(1, 7))
+            nav_label, nav_data = "Mehr ➡️", "persons_page_high"
+        else:
+            nums = list(range(7, 13))
+            nav_label, nav_data = "⬅️ Weniger", "persons_page_low"
+
+        row_numbers = [
+            InlineKeyboardButton(f"{n} ✅" if sel == n else f"{n}", callback_data=f"persons_{n}")
+            for n in nums
+        ]
+        done_label = "✔️ Weiter" if isinstance(sel, int) else "Weiter"
+        footer = [
+            InlineKeyboardButton(nav_label, callback_data=nav_data),
+            InlineKeyboardButton(done_label, callback_data="persons_done"),
+        ]
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([row_numbers, footer]))
+        return PERSONS_SELECTION
+
+    # 3) Fertig -> jetzt weiter
+    if data == "persons_done":
+        sel = context.user_data.get("temp_persons")
+        if not isinstance(sel, int):
+            await query.answer("Bitte zuerst eine Zahl auswählen.", show_alert=True)
+            return PERSONS_SELECTION
+
+        # Auswahl als finale Personenanzahl übernehmen
+        context.user_data["personen"] = sel
+
+        # weiter im Flow:
         return await fertig_input(update, context)
 
-    # Fallback
-    return ConversationHandler.END
-
-
+    return PERSONS_SELECTION
 
 
 async def persons_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1809,101 +2545,68 @@ async def quickone_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # 1) Flow-Nachrichten zurücksetzen
+    # 🔧 Wichtig: Alte Vorschlagskarte (falls noch vorhanden) IMMER vorher entfernen
+    await delete_proposal_card(context, chat_id)
+
+    # 1) Flow-UI zurücksetzen (nur Nachrichtenliste), Pools nicht mehr nötig
     context.user_data["flow_msgs"] = []
+    context.user_data.pop("quickone_side_pools", None)  # nicht mehr genutzt
 
-    # 2) Pools nur beim echten Einstieg resetten
-    if (not update.callback_query) or update.callback_query.data == "start_quickone":
-        context.user_data.pop("quickone_remaining", None)
-        context.user_data.pop("quickone_side_pools", None)
-
-    # 3) Gerichtspool initialisieren
-    remaining = context.user_data.get("quickone_remaining")
+    # 2) Gerichtspool initialisieren oder weiterverwenden
     all_dishes = [d for d in df_gerichte["Gericht"].tolist() if isinstance(d, str) and d.strip()]
-    if not remaining:
+    remaining = context.user_data.get("quickone_remaining")
+
+    # Nur wenn der Pool noch nie existierte → mit allen Gerichten befüllen
+    if remaining is None:
         remaining = all_dishes.copy()
 
+    # Wenn der Pool existiert, aber leer ist → Durchgang zu Ende
+    if not remaining:
+        msg = await context.bot.send_message(
+            chat_id,
+            pad_message("⚠️ Es sind keine neuen Gerichte mehr im aktuellen Durchgang.\n"
+                        "Starte bitte neu mit »🔄 Restart«.")
+        )
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+        return QUICKONE_CONFIRM
+
     # Favoriten (3x) × Aktiv-Gewicht
-    uid       = str(update.effective_user.id)
     user_favs = favorites.get(uid, [])
     wmap      = df_gerichte.set_index("Gericht")["Gewicht"].to_dict()
-    weights   = [ (3 if d in user_favs else 1) * float(wmap.get(d, 1.0)) for d in remaining ]
+    weights   = [(3 if d in user_favs else 1) * float(wmap.get(d, 1.0)) for d in remaining]
 
     dish = random.choices(remaining, weights=weights, k=1)[0]
-
     remaining.remove(dish)
     context.user_data["quickone_remaining"] = remaining
 
-    # 4) Beilagen-Codes filtern und nur wenn vorhanden Pools nutzen
-    raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-    all_codes = parse_codes(raw)
-    codes = [c for c in all_codes if c != 0]
-    if not codes:
-        # keine Beilagen möglich
-        side_nums = []
-    else:
-        # Pools initialisieren
-        side_pools = context.user_data.setdefault("quickone_side_pools", {})
-        if dish not in side_pools:
-            carbs_list = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            veggies_list = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            if 99 in codes:
-                pool = {"carbs": carbs_list.copy(), "veggies": veggies_list.copy()}
-            elif 88 in codes:
-                pool = {"single": carbs_list.copy()}
-            elif 77 in codes:
-                pool = {"single": veggies_list.copy()}
-            else:
-                pool = {"single": codes.copy()}
-            side_pools[dish] = pool
-
-        # aus den Pools ziehen
-        pool = side_pools[dish]
-        if "carbs" in pool and "veggies" in pool:
-            if not pool["carbs"]:
-                pool["carbs"] = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            if not pool["veggies"]:
-                pool["veggies"] = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            c = random.choice(pool["carbs"]); pool["carbs"].remove(c)
-            v = random.choice(pool["veggies"]); pool["veggies"].remove(v)
-            side_nums = [c, v]
-        else:
-            single_pool = pool.get("single", [])
-            if not single_pool:
-                # Pool neu füllen
-                pool["single"] = pool.get("single", []).copy()
-                single_pool = pool["single"]
-            num = random.choice(single_pool); pool["single"].remove(num)
-            side_nums = [num]
-
-    # 5) Namen ermitteln
-    sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
-
-    # 6) Session speichern
+    # 3) Session setzen – KEINE Beilagen mehr vorwählen
     sessions[uid] = {
-        "menues": [dish],
-        "aufwand": [0],
-        "beilagen": {dish: side_nums}
+        "menues":  [dish],
+        "aufwand": [int(df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].iloc[0]) if not df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].empty else 0],
+        "beilagen": {}
     }
     persist_session(update)
 
-    # 7) Gericht anzeigen
-    text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
-    msg1 = await context.bot.send_message(chat_id, text=pad_message(text1), parse_mode="Markdown")
-    context.user_data["flow_msgs"].append(msg1.message_id)
+    # bevorzugt Session-Aufwand, sonst df
+    try:
+        lvl = sessions[uid]["aufwand"][0]
+    except Exception:
+        lvl = get_aufwand_for(dish)
 
-    # 8) Frage „Passt das?“
-    buttons = [
-        InlineKeyboardButton("Passt", callback_data="quickone_passt"),
-        InlineKeyboardButton("Neu!", callback_data="quickone_neu"),
-    ]
-    if sides:
-        buttons.append(InlineKeyboardButton("Beilagen neu", callback_data="quickone_beilagen_neu"))
-    markup = InlineKeyboardMarkup([buttons])
-    msg2 = await context.bot.send_message(chat_id, text=pad_message("Passt das?"), reply_markup=markup)
-    context.user_data["flow_msgs"].append(msg2.message_id)
+    label_txt = effort_label(lvl)
+    aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
+
+    # 4) Vorschlag + Buttons (in *derselben* Nachricht)
+    text = pad_message(f"🥣 <u><b>Vorschlag:</b></u>\n\n{escape(dish)} {aufwand_label}")
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✔️ Passt", callback_data="quickone_passt"),
+        InlineKeyboardButton("🔁 Neu",   callback_data="quickone_neu"),
+    ]])
+    msg = await context.bot.send_message(chat_id, text=text, reply_markup=markup)
+    context.user_data["proposal_msg_id"] = msg.message_id  # gezielt als Vorschlagskarte tracken
 
     return QUICKONE_CONFIRM
+
 
 
 # ─────────── quickone_confirm_cb ───────────
@@ -1915,98 +2618,135 @@ async def quickone_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = q.message.chat.id
     data = q.data
 
-    # Passt → sofort Frage-Nachricht löschen, dann Personenfrage
     if data == "quickone_passt":
-        flow = context.user_data.get("flow_msgs", [])
-        if flow:
-            last_id = flow.pop()
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
-                pass
-        return await ask_for_persons(update, context)
+        # Buttons am Vorschlag entfernen
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
 
-    # Neu! → komplett neu starten
-    if data == "quickone_neu":
-        for mid in context.user_data.get("flow_msgs", []):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            except:
-                pass
-        context.user_data["flow_msgs"].clear()
-        return await quickone_start(update, context)
-
-    # Beilagen neu → nur Beilagen tauschen, Gericht bleibt
-    if data == "quickone_beilagen_neu":
-        for mid in context.user_data.get("flow_msgs", []):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            except:
-                pass
-        context.user_data["flow_msgs"].clear()
-
-        # Dynamische Beilagen-Auswahl wie in quickone_start
         dish = sessions[uid]["menues"][0]
-        side_pools = context.user_data.setdefault("quickone_side_pools", {})
-        pool = side_pools.get(dish)
-        if not pool:
-            # init as above
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = parse_codes(raw)
-            carbs_list = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            veggies_list = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            if 99 in codes:
-                pool = {"carbs": carbs_list.copy(), "veggies": veggies_list.copy()}
-            elif 88 in codes:
-                pool = {"single": carbs_list.copy()}
-            elif 77 in codes:
-                pool = {"single": veggies_list.copy()}
-            else:
-                pool = {"single": [c for c in codes if c != 0]}
-            side_pools[dish] = pool
+        allowed = allowed_sides_for_dish(dish)
 
-        # Auswahl wie oben
-        if "carbs" in pool and "veggies" in pool:
-            if not pool["carbs"]:
-                pool["carbs"] = df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"].tolist()
-            if not pool["veggies"]:
-                pool["veggies"] = df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"].tolist()
-            c = random.choice(pool["carbs"]); pool["carbs"].remove(c)
-            v = random.choice(pool["veggies"]); pool["veggies"].remove(v)
-            side_nums = [c, v]
-        else:
-            single_pool = pool.get("single", [])
-            if not single_pool:
-                pool["single"] = pool.get("single", []).copy()
-                single_pool = pool["single"]
-            num = random.choice(single_pool); pool["single"].remove(num)
-            side_nums = [num]
+        # ⚠️ WICHTIG: wie im Menü-Loop — wenn KEINE Beilagen möglich sind,
+        # KEIN Debug rendern, sondern direkt weiter.
+        if not allowed:
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
 
-        # Session aktualisieren
-        sessions[uid]["beilagen"][dish] = side_nums
+        # Ab hier gibt es Beilagen → Debug jetzt (erst) anzeigen
+        await render_beilage_precheck_debug(update, context, dish, prefix="DEBUG Beilagenvorprüfung:")
+
+        kb = InlineKeyboardMarkup([[ 
+            InlineKeyboardButton("Ja",   callback_data="quickone_ask_yes"),
+            InlineKeyboardButton("Nein", callback_data="quickone_ask_no"),
+        ]])
+        msg = await q.message.reply_text(
+            pad_message("Möchtest Du Beilagen hinzufügen?"),
+            reply_markup=kb
+        )
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
+        return QUICKONE_CONFIRM
+
+
+
+
+    if data == "quickone_neu":
+        # Keinen kompletten Neustart; ersetze die bestehende Vorschlagskarte in-place
+        remaining = context.user_data.get("quickone_remaining")
+        all_dishes = [d for d in df_gerichte["Gericht"].tolist() if isinstance(d, str) and d.strip()]
+
+        if remaining is None:
+            remaining = all_dishes.copy()
+
+        if not remaining:
+            try:
+                await q.answer("Keine neuen Gerichte mehr im aktuellen Durchgang. Bitte »🔄 Restart«.", show_alert=True)
+            except Exception:
+                pass
+            return QUICKONE_CONFIRM
+
+        # Favoriten (3x) × Aktiv-Gewicht
+        user_favs = favorites.get(uid, [])
+        wmap = df_gerichte.set_index("Gericht")["Gewicht"].to_dict()
+        weights = [(3 if d in user_favs else 1) * float(wmap.get(d, 1.0)) for d in remaining]
+
+        dish = random.choices(remaining, weights=weights, k=1)[0]
+        try:
+            remaining.remove(dish)
+        except ValueError:
+            pass
+        context.user_data["quickone_remaining"] = remaining
+
+        # Session aktualisieren (ein Gericht)
+        sessions[uid] = {
+            "menues": [dish],
+            "aufwand": [int(df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].iloc[0]) if not df_gerichte.loc[df_gerichte["Gericht"] == dish, "Aufwand"].empty else 0],
+            "beilagen": {}
+        }
         persist_session(update)
-        sides = df_beilagen[df_beilagen["Nummer"].isin(side_nums)]["Beilagen"].tolist()
 
-        # Gericht erneut anzeigen
-        text1 = f"🥣 *Dein Gericht:*\n{format_dish_with_sides(dish, sides)}"
-        msg1 = await context.bot.send_message(chat_id, text=text1, parse_mode="Markdown")
-        context.user_data["flow_msgs"].append(msg1.message_id)
+        # Aufwand-Label
+        try:
+            lvl = sessions[uid]["aufwand"][0]
+        except Exception:
+            lvl = get_aufwand_for(dish)
+        label_txt = effort_label(lvl)
+        aufwand_label = f" <i>{escape(label_txt)}</i>" if label_txt else ""
 
-        # Wieder „Passt das?“
-        buttons = [
-            InlineKeyboardButton("Passt", callback_data="quickone_passt"),
-            InlineKeyboardButton("Neu!", callback_data="quickone_neu"),
-            InlineKeyboardButton("Beilagen neu", callback_data="quickone_beilagen_neu"),
-        ]
-        markup = InlineKeyboardMarkup([buttons])
-        msg2 = await context.bot.send_message(chat_id, text=pad_message("Passt das?"), reply_markup=markup)
-        context.user_data["flow_msgs"].append(msg2.message_id)
+        # Text der bestehenden Vorschlagskarte ersetzen
+        title = "Neuer Vorschlag:"
+        text = pad_message(f"🥣 <u><b>{title}</b></u>\n\n{escape(dish)} {aufwand_label}")
+
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✔️ Passt", callback_data="quickone_passt"),
+            InlineKeyboardButton("🔁 Neu",   callback_data="quickone_neu"),
+        ]])
+
+        pid = context.user_data.get("proposal_msg_id")
+        if isinstance(pid, int):
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=pid,
+                    text=text,
+                    reply_markup=kb
+                )
+            except Exception:
+                # Fallback: wenn Edit scheitert, Karte neu senden und ID aktualisieren
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=pid)
+                except Exception:
+                    pass
+                msg_new = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+                context.user_data["proposal_msg_id"] = msg_new.message_id
+        else:
+            msg_new = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            context.user_data["proposal_msg_id"] = msg_new.message_id
 
         return QUICKONE_CONFIRM
 
+
+    if data == "quickone_ask_no":
+        # Beilagen-Frage (diese Nachricht) entfernen
+        await safe_delete_and_untrack(context, chat_id, q.message.message_id, "flow_msgs")
+
+        # Direkt zur Personen-Auswahl (Vorschlag bleibt sichtbar)
+        return await show_final_dishes_and_ask_persons(update, context, step=2)
+
+
+    if data == "quickone_ask_yes":
+        # Beilagen-Frage (diese Nachricht) entfernen
+        await safe_delete_and_untrack(context, chat_id, q.message.message_id, "flow_msgs")
+
+        # QuickOne hat exakt 1 Gericht → direkt in die Beilagen-Auswahl für dieses Gericht
+        dish = sessions[uid]["menues"][0]
+        context.user_data["menu_list"] = [dish]
+        context.user_data["to_process"] = [0]
+        context.user_data["menu_idx"]   = 0
+
+        return await ask_beilagen_for_menu(q, context)
+
     return ConversationHandler.END
-
-
 
 
 async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2015,78 +2755,44 @@ async def ask_beilagen_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = str(query.from_user.id)
 
-    # User hat „Nein“ bei Beilagen-Frage gewählt → finale Übersicht
     if query.data == "ask_no":
-        # 1) Visuelles Feedback
-        await mark_yes_no(query, False, "ask_yes", "ask_no")
+        # Beilagenfrage selbst entfernen bleibt korrekt:
+        try:
+            await context.bot.delete_message(chat_id=query.message.chat.id, message_id=query.message.message_id)
+        except Exception:
+            pass
+        return await show_final_dishes_and_ask_persons(update, context, step=2)
 
-        # 2) Alle bisherigen Flow-Messages löschen
-        chat_id = query.message.chat.id
-        for mid in context.user_data.get("flow_msgs", []):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            except:
-                pass
-        context.user_data["flow_msgs"].clear()
 
-        # 3) Finale Übersicht senden
-        text = "🥣 Deine finale Liste:\n"
-        for dish in sessions[uid]["menues"]:
-            sel_nums   = sessions[uid].get("beilagen", {}).get(dish, [])
-            side_names = df_beilagen.loc[
-                df_beilagen["Nummer"].isin(sel_nums), "Beilagen"
-            ].tolist()
-            text += f"- {format_dish_with_sides(dish, side_names)}\n"
-        msg = await query.message.reply_text(pad_message(text))
-        context.user_data["flow_msgs"].append(msg.message_id)
-
-        # 4) Direkt nach Personen fragen
-        return await ask_for_persons(update, context)
-
-    # User hat „Ja“ bei Beilagen-Frage gewählt → Beilagen-Loop wie bisher
     if query.data == "ask_yes":
-        await mark_yes_no(query, True, "ask_yes", "ask_no")
+        # Beilagen-Frage sofort entfernen
+        await safe_delete_and_untrack(context, query.message.chat.id, query.message.message_id, "flow_msgs")
 
-        # 1) Prüfen, welche Gerichte Beilagen haben
         menus = sessions[uid]["menues"]
-        side_menus = [
-             idx for idx, dish in enumerate(menus)
-             if any(c != 0 for c in parse_codes(
-                 df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-             ))
-         ]
+        side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
-        # 2a) Genau 1 Gericht → direkt in den Einzel-Loop springen
+        if len(side_menus) == 0:
+            return await show_final_dishes_and_ask_persons(update, context, step=3)
+
+
         if len(side_menus) == 1:
             context.user_data["menu_list"] = menus
             context.user_data["to_process"] = side_menus
-            context.user_data["menu_idx"]    = 0
+            context.user_data["menu_idx"]   = 0
             return await ask_beilagen_for_menu(query, context)
 
-
-        # 2b) Mehrere Gerichte → normale Mehrfach-Auswahl wie bisher
-        menus = (context.user_data.get("menu_list")
-                 or sessions[str(query.from_user.id)]["menues"])
-        buttons = []
-        for i, gericht in enumerate(menus, start=1):
-            codes = parse_codes(
-                df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0]
-            )
-            if not codes or codes == [0]:
-                continue
-            buttons.append(InlineKeyboardButton(str(i), callback_data=f"select_{i}"))
-        buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
-        kb = [buttons[j:j+4] for j in range(0, len(buttons), 4)]
-        msg = await query.message.reply_text(
-            pad_message("Für welche Menüs? (Mehrfachauswahl, dann Fertig)"),
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        context.user_data["flow_msgs"].append(msg.message_id)
-        context.user_data["selected_menus"] = set()
+        context.user_data["menu_list"] = menus
+        context.user_data["selected_menus"] = set()  # 0-basierte Indizes
+        kb = build_menu_select_keyboard_for_sides(menus, context.user_data["selected_menus"], max_len=35)
+        msg = await query.message.reply_text(pad_message("Für welche Gerichte?"), reply_markup=kb)
+        context.user_data.setdefault("flow_msgs", []).append(msg.message_id)
         return SELECT_MENUES
 
-    # Fallback
+
+
+
     return BEILAGEN_SELECT
+
    
 async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -2099,54 +2805,40 @@ async def ask_beilagen_for_menu(update_or_query, context: ContextTypes.DEFAULT_T
     menus = context.user_data["menu_list"]
     gericht = menus[idx]
 
+    if show_debug_for(update_or_query):
+        try:
+            raw_series = df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"]
+            raw = str(raw_series.iloc[0]) if not raw_series.empty else "<n/a>"
+        except Exception:
+            raw = "<err>"
+        codes = parse_codes(raw)
+        allowed = sorted(list(allowed_sides_for_dish(gericht)))
+        msg_dbg = await update_or_query.message.reply_text(
+            f"DEBUG {gericht}: raw='{raw}' → codes={codes} → allowed={allowed}"
+        )
+        context.user_data.setdefault("flow_msgs", []).append(msg_dbg.message_id)
+
     # 2) Beilage-Codes aus df_gerichte lesen und parsen
     raw = df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0]
-    codes = parse_codes(raw)
+    codes = [c for c in parse_codes(raw) if c != 0]
 
-    # 3) Erlaubte Nummern ermitteln
-    erlaubt = set()
-    if 99 in codes:
-        # sowohl Kategorien Kohlenhydrate & Gemüse, keine spezifischen
-        erlaubt = set(
-            df_beilagen[df_beilagen["Kategorie"].isin(["Kohlenhydrate", "Gemüse"])]["Nummer"]
-        )
-    else:
-        if 88 in codes:
-            erlaubt |= set(df_beilagen[df_beilagen["Kategorie"] == "Kohlenhydrate"]["Nummer"])
-            codes = [c for c in codes if c != 88]
-        if 77 in codes:
-            erlaubt |= set(df_beilagen[df_beilagen["Kategorie"] == "Gemüse"]["Nummer"])
-            codes = [c for c in codes if c != 77]
-        erlaubt |= set(codes)
 
-    # Erlaube den späteren Zugriff in beilage_select_cb
+    # 2) Erlaubte Nummern aus zentraler Funktion
+    erlaubt = set(allowed_sides_for_dish(gericht))
     context.user_data["allowed_beilage_codes"] = erlaubt
 
-
-    # 4) Inline-Buttons bauen (max. 3 pro Zeile) + 'Fertig' in eigener Zeile
-    side_buttons = []
-    for num, name, cat in zip(df_beilagen["Nummer"], df_beilagen["Beilagen"], df_beilagen["Kategorie"]):
-        if num in erlaubt:
-            side_buttons.append(
-                InlineKeyboardButton(name, callback_data=f"beilage_{num}")
-            )
-
-    rows = distribute_buttons_equally(side_buttons, max_per_row=3)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="beilage_done")])
-
-    # 5) Nachricht senden + tracken
-    msg = await update_or_query.message.reply_text(
-        pad_message(f"Wähle Beilagen für: *{gericht}*"),
-        reply_markup=InlineKeyboardMarkup(rows),
-        parse_mode="Markdown"
-    )
-    context.user_data["flow_msgs"].append(msg.message_id)
-
-
-
-    # 6) Auswahl initialisieren
+    # 3) Auswahl initialisieren (falls noch nicht vorhanden)
     uid = str(update_or_query.from_user.id)
-    sessions.setdefault(uid, {}).setdefault("beilagen", {})[gericht] = []
+    sel = sessions.setdefault(uid, {}).setdefault("beilagen", {}).setdefault(gericht, [])
+
+    # 4) Inline-Buttons bauen (max. 3/Zeile)
+    markup = build_beilage_keyboard(erlaubt, sel)
+    msg = await update_or_query.message.reply_text(
+        pad_message(f"Wähle Beilagen für: <b>{escape(gericht)}</b>"),
+        reply_markup=markup,
+    )
+    track_msg(context, "flow_msgs", msg.message_id)
+
 
     return BEILAGEN_SELECT
 
@@ -2165,12 +2857,14 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "select_done":
         if not sel:
-            await query.message.reply_text("⚠️ Keine Menüs ausgewählt. Abbruch.")
-            return ConversationHandler.END
-        context.user_data["to_process"] = sorted(i-1 for i in sel)  # in 0-basiert
-        context.user_data["to_process"] = sorted(sel)
-        context.user_data["menu_idx"] = 0
+            return await show_final_dishes_and_ask_persons(update, context, step=5)
+
+
+        context.user_data["to_process"] = sorted(sel)  # 0-basierte Indizes
+        context.user_data["menu_idx"]   = 0
         return await ask_beilagen_for_menu(query, context)
+
+
 
     idx = int(data.split("_")[1]) - 1
     if idx in sel:
@@ -2178,18 +2872,13 @@ async def select_menus_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         sel.add(idx)
 
-    buttons = []
-    for i, gericht in enumerate(menus, start=1):
-        # Codes parsen und nur weiter, wenn mindestens ein Code ≠ 0 existiert
-        codes = parse_codes(df_gerichte.loc[df_gerichte["Gericht"] == gericht, "Beilagen"].iloc[0])
-        if not codes or codes == [0]:
-            continue
-        mark = " ✅" if (i-1) in sel else ""
-        buttons.append(InlineKeyboardButton(f"{i}{mark}", callback_data=f"select_{i}"))
-    buttons.append(InlineKeyboardButton("Fertig", callback_data="select_done"))
-    kb = distribute_buttons_equally(buttons, max_per_row=4)
-    await query.message.edit_reply_markup(InlineKeyboardMarkup(kb))
+    # Nach dem Toggle: Keyboard mit Namensbuttons neu rendern
+    await query.message.edit_reply_markup(
+        reply_markup=build_menu_select_keyboard_for_sides(menus, sel, max_len=35)
+    )
     return SELECT_MENUES
+
+
 
 
 async def ask_showlist_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2215,64 +2904,34 @@ async def beilage_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     uid = str(query.from_user.id)
-    # Welches Gericht gerade dran ist?
     idx_list = context.user_data["to_process"]
     idx = idx_list[context.user_data["menu_idx"]]
     menus = context.user_data["menu_list"]
     gericht = menus[idx]
 
-    # Aktuelle Auswahl-Liste aus sessions
     sel = sessions.setdefault(uid, {}).setdefault("beilagen", {}).setdefault(gericht, [])
 
-    # Wenn „Fertig“ gedrückt wurde: nächstes Gericht oder Ende
     if data == "beilage_done":
         context.user_data["menu_idx"] += 1
         if context.user_data["menu_idx"] < len(idx_list):
             return await ask_beilagen_for_menu(query, context)
 
-        # --- Nach Abschluss des Beilagen-Loops: finale Übersicht ---
-        # 1) Alle bisherigen Flow-Messages löschen
-        chat_id = query.message.chat.id
-        for mid in context.user_data.get("flow_msgs", []):
-            try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-            except:
-                pass
-        context.user_data["flow_msgs"].clear()
+        # Alle Menüs abgearbeitet → zentrale Ausgabe
+        return await show_final_dishes_and_ask_persons(update, context, step=1)
 
-        # 2) Finale Gerichte-Übersicht senden
-        text = "🥣 Deine finale Liste:\n"
-        for dish in sessions[uid]["menues"]:
-            nums = sessions[uid].get("beilagen", {}).get(dish, [])
-            names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-            text += f"- {format_dish_with_sides(dish, names)}\n"
-        msg = await query.message.reply_text(pad_message(text))
-        context.user_data["flow_msgs"].append(msg.message_id)
 
-        # 3) Direkt nach Personen fragen
-        return await ask_for_persons(update, context)
 
-    # Sonst: Toggle einer Beilage
+    # Toggle einer Beilage
     num = int(data.split("_")[1])
     if num in sel:
         sel.remove(num)
     else:
         sel.append(num)
 
-    # Buttons neu aufbauen mit Markierungen (max. 3 pro Zeile) + 'Fertig' in eigener Zeile
-    side_buttons = []
-    for code in context.user_data.get("allowed_beilage_codes", []):
-        name = df_beilagen.loc[df_beilagen["Nummer"] == code, "Beilagen"].iloc[0]
-        mark = " ✅" if code in sel else ""
-        side_buttons.append(
-            InlineKeyboardButton(f"{mark}{name}", callback_data=f"beilage_{code}")
-        )
-
-    rows = distribute_buttons_equally(side_buttons, max_per_row=3)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="beilage_done")])
-    await query.message.edit_reply_markup(InlineKeyboardMarkup(rows))
-
-
+    # Buttons neu zeichnen
+    markup = build_beilage_keyboard(set(context.user_data.get("allowed_beilage_codes", [])), sel)
+    await query.message.edit_reply_markup(markup)
+    
     return BEILAGEN_SELECT
 
 
@@ -2305,7 +2964,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ].tolist()
             # Grammatik-korrekte Verkettung
             formatted = format_dish_with_sides(dish, beiname)
-            reply += f"- {formatted}\n"
+            reply += f"‣ {escape(formatted)}\n"
     else:
         reply += "ℹ️ Keine aktive Session."
     await update.message.reply_text(reply)
@@ -2315,13 +2974,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_profile_choice_keyboard() -> InlineKeyboardMarkup:
     """Inline-Buttons für die Frage ›Wie möchtest Du fortfahren?‹"""
     kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("...mit bestehendem Profil",  callback_data="prof_exist")],
+        [InlineKeyboardButton("...ohne Einschränkung",  callback_data="prof_nolim"),],
         [
-            InlineKeyboardButton("Bestehendes Profil",  callback_data="prof_exist"),
-            InlineKeyboardButton("Ohne Einschränkung",  callback_data="prof_nolim"),
-        ],
-        [
-            InlineKeyboardButton("Neues Profil",        callback_data="prof_new"),
-            InlineKeyboardButton("Mein Profil",         callback_data="prof_show"),
+            InlineKeyboardButton("✍️ Profil erstellen",        callback_data="prof_new"),
+            InlineKeyboardButton("👀 Profil anzeigen",         callback_data="prof_show"),
         ]
     ])
     return kb
@@ -2346,6 +3003,7 @@ def build_style_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
 
     # Label für »Alles«: Haken nur, wenn wirklich alle Stile gewählt
     label_all = "✅ Alles" if selected == ALL_STYLE_KEYS else "Alles"
+    done_label = "✔️ Fertig" if selected else "(wähle oben)"
 
     rows = [
         [
@@ -2360,9 +3018,7 @@ def build_style_keyboard(selected: set[str]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(label("style_orient",        "Orientalisch"),  callback_data="style_orient"),
             InlineKeyboardButton(label_all,                   callback_data="style_all"),
         ],
-        [
-            InlineKeyboardButton("✔️ Fertig", callback_data="style_done"),
-        ],
+        [ InlineKeyboardButton(done_label, callback_data="style_done") ]
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -2388,16 +3044,24 @@ def build_aufwand_keyboard(verteilung: dict, total: int) -> InlineKeyboardMarkup
     rows = [
         zeile("Leicht", "light"),
         zeile("Mittel", "medium"),
-        zeile("Aufwändig", "heavy")
+        zeile("Aufwändig", "heavy"),
     ]
 
+    
     summe = sum(verteilung.values())
     if summe == total:
-        rows.append([InlineKeyboardButton("✔️ Weiter", callback_data="aufwand_done")])
+        rows.append([
+            InlineKeyboardButton("🎲 Zufall", callback_data="aufwand_rand"),
+            InlineKeyboardButton("✅ Weiter", callback_data="aufwand_done"),
+        ])
     else:
-        rows.append([InlineKeyboardButton(f"{summe}/{total} gewählt", callback_data="noop")])
+        rows.append([
+            InlineKeyboardButton("🎲 Zufall", callback_data="aufwand_rand"),
+            InlineKeyboardButton(f"{summe}/{total} gewählt", callback_data="noop"),
+        ])
 
     return InlineKeyboardMarkup(rows)
+
 
 
 
@@ -2405,20 +3069,19 @@ def profile_overview_text(p: dict) -> str:
     """Formatiert die Profil-Übersicht"""
     styles_str = "Alle Stile" if not p["styles"] else ", ".join(p["styles"])
     return (
-        "🗂 **Dein Profil**\n"
-        f"• Ernährungsstil: {p['restriction']}\n"
-        f"• Küche: {styles_str}\n"
-        f"• Typ: {p['weight'] if p['weight'] else 'Egal'}"
+        "🗂 <b>Dein Profil</b>\n"
+        f"• Ernährungsstil: {escape(str(p.get('restriction', '')))}\n"
+        f"• Küche: {escape(styles_str)}\n"
+        f"• Typ: {escape(str(p.get('weight', 'Egal') or 'Egal'))}"
     )
 
 def build_profile_overview_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🔄 Neu anlegen", callback_data="prof_overwrite"),
-            InlineKeyboardButton("➡️ Weiter",       callback_data="prof_next"),
+            InlineKeyboardButton("🔙 Zurück",       callback_data="prof_back"),
         ]
     ])
-
 
 
 ##############################################
@@ -2551,12 +3214,22 @@ async def tausche(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n⚙️ Typ-Verteilung:      {typ_text}"
             f"\n🥗 Ernährungsstil:       {einschr_text}"
         )
-        await update.message.reply_text(debug_msg)
+        await upsert_distribution_debug(update, context, debug_msg)
+
 
     await update.message.reply_text(
         "🔄 Neue Menüs:\n" +
         "\n".join(f"{i+1}. {g}" for i, g in enumerate(menues))
     )
+
+    if show_debug_for(update):
+        try:
+            dbg_txt = build_selection_debug_text(menues)
+            if dbg_txt:
+                await upsert_distribution_debug(update, context, dbg_txt)
+        except Exception:
+            pass
+
 
 async def tausche_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_session_loaded_for_user_and_chat(update)
@@ -2613,10 +3286,21 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 changed = True
 
         if changed:
-            await query.message.edit_reply_markup(
-                reply_markup=build_aufwand_keyboard(verteilung, total)
-            )
+            await _debounced_aufwand_render(query, context)
 
+        return MENU_AUFWAND
+
+    elif data == "aufwand_rand":
+        # zufällige Verteilung auf 3 Klassen, Summe = total
+        total = context.user_data["menu_count"]
+        picks = [random.choice(("light", "medium", "heavy")) for _ in range(total)]
+        verteilung["light"]  = picks.count("light")
+        verteilung["medium"] = picks.count("medium")
+        verteilung["heavy"]  = picks.count("heavy")
+
+        await query.message.edit_reply_markup(
+            reply_markup=build_aufwand_keyboard(verteilung, total)
+        )
         return MENU_AUFWAND
 
     elif data == "aufwand_done":
@@ -2624,18 +3308,34 @@ async def aufwand_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Noch nicht vollständig verteilt!", show_alert=True)
             return MENU_AUFWAND
 
-        # Werte übernehmen und weiterreichen als Text wie bisher
-        context.user_data["flow_msgs"].append(query.message.message_id)
         a1 = verteilung["light"]
         a2 = verteilung["medium"]
         a3 = verteilung["heavy"]
-        total = a1 + a2 + a3  # sichere Gesamtmenge, basierend auf den realen Klicks
+        total = a1 + a2 + a3  # sichere Gesamtmenge
+
+        # 🚫 WICHTIG: evtl. geplanten Debounce-Render abbrechen (gegen „erst Buttons weg, dann Text weg“)
+        task = context.user_data.pop("aufw_render_task", None)
+        if task and not task.done():
+            try:
+                task.cancel()
+            except Exception:
+                pass
+        context.user_data["aufw_dirty"] = False
+
+        # Nachricht EINMALIG komplett löschen (Buttons + Text zusammen)
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat.id,
+                message_id=query.message.message_id
+            )
+        except Exception:
+            pass
 
         return await menu_input_direct(f"{total} ({a1},{a2},{a3})", update, context)
 
-
     elif data == "noop":
         return MENU_AUFWAND
+
 
 
 
@@ -2671,46 +3371,59 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return TAUSCHE_SELECT
 
-    # 2) 'Fertig' ohne Auswahl → Warnung
     if data == "swap_done" and not sel:
-        await q.answer("Nichts ausgewählt.", show_alert=True)
-        return TAUSCHE_SELECT
+        # Tausch-Frage entfernen
+        try:
+            await context.bot.delete_message(
+                chat_id=q.message.chat.id,
+                message_id=q.message.message_id
+            )
+        except Exception:
+            pass
 
-    # 3) 'Fertig' mit Auswahl → weiter in Schritt 4
+        # Weiter wie 'Passt' → Beilagenfrage oder direkt Personen
+        menus = sessions[uid]["menues"]
+        side_menus = [i for i, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
 
+        if not side_menus:
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ja", callback_data="ask_yes"),
+             InlineKeyboardButton("Nein", callback_data="ask_no")]
+        ])
+        msg2 = await q.message.reply_text(pad_message("Möchtest Du Beilagen hinzufügen?"), reply_markup=kb)
+        context.user_data.setdefault("flow_msgs", []).append(msg2.message_id)
+        return ASK_BEILAGEN
+
+
+    # 3) 'Weiter' mit Auswahl → alten Vorschlag + Tauschfrage löschen, neuen Vorschlag senden
     if data == "swap_done":
-        # 1) Profil-hard filter + Basis-DataFrame
-        profile  = profiles.get(uid)
+        # 1) Profil / Basis
+        profile = profiles.get(uid)
         basis_df = apply_profile_filters(df_gerichte, profile)
 
         sessions[uid].setdefault("beilagen", {})
-        menues   = sessions[uid]["menues"]
-        aufw     = sessions[uid]["aufwand"]
-        # Globaler Swap-History per Aufwand-Stufe initialisieren
+        menues = sessions[uid]["menues"]
+        aufw = sessions[uid]["aufwand"]
         swap_history = sessions[uid].setdefault("swap_history", {1: [], 2: [], 3: []})
-        # Beim ersten Mal: die initialen Menüs eintragen
         if all(len(v) == 0 for v in swap_history.values()):
             for dish, lvl in zip(menues, aufw):
                 swap_history[lvl].append(dish)
 
-
         swapped_slots: list[int] = []
         for idx in sorted(sel):
-            slot          = idx - 1
-            current_dish  = menues[slot]
-            current_aufw  = aufw[slot]
-            row_cur       = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
-            current_art   = ART_ORDER.get(row_cur["Typ"], 2)
+            slot = idx - 1
+            current_dish = menues[slot]
+            current_aufw = aufw[slot]
+            row_cur = df_gerichte[df_gerichte["Gericht"] == current_dish].iloc[0]
+            current_art = ART_ORDER.get(row_cur["Typ"], 2)
 
-            # a) Andere Slots ausschließen
             other_sel = set(menues) - {current_dish}
-
-            # b) Kandidaten auf diese Aufwand-Stufe einschränken
             cands = set(
                 basis_df[basis_df["Aufwand"] == current_aufw]["Gericht"]
             ) - {current_dish} - other_sel
 
-            # c) Aufwand-Fallback
             if not cands:
                 for lvl in (current_aufw - 1, current_aufw + 1):
                     if 1 <= lvl <= 3:
@@ -2721,34 +3434,29 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             cands = fb
                             break
 
-            # d) No-Repeat global per Stufe
             used = set(swap_history[current_aufw])
             pool = list(cands - used)
             if not pool:
                 swap_history[current_aufw] = [
-                    m for m, lvl in zip(menues, aufw) if lvl == current_aufw
+                    m for m, lv in zip(menues, aufw) if lv == current_aufw
                 ]
                 used = set(swap_history[current_aufw])
                 pool = list(cands - used)
             if not pool:
                 continue
 
-
-            # e) Scoring nach Aufwand & Art
             scored = []
             for cand in pool:
-                row_c    = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
-                cand_aw  = int(row_c["Aufwand"])
+                row_c = df_gerichte[df_gerichte["Gericht"] == cand].iloc[0]
+                cand_aw = int(row_c["Aufwand"])
                 cand_art = ART_ORDER.get(row_c["Typ"], 2)
-                d_aw     = abs(current_aufw - cand_aw)
-                d_art    = abs(current_art   - cand_art)
+                d_aw = abs(current_aufw - cand_aw)
+                d_art = abs(current_art - cand_art)
                 scored.append((cand, (d_aw, d_art)))
 
             min_score = min(score for _, score in scored)
-            best      = [c for c, score in scored if score == min_score]
+            best = [c for c, score in scored if score == min_score]
 
-            # f) Tausche & History updaten
-            # Aktiv-/Gewicht-Bias in Tie-Break
             def _aktiv_weight(name: str) -> float:
                 row = df_gerichte[df_gerichte["Gericht"] == name].iloc[0]
                 if "Gewicht" in row.index:
@@ -2767,49 +3475,40 @@ async def tausche_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sessions[uid]["beilagen"].pop(current_dish, None)
             swapped_slots.append(idx)
 
-
-
-
-        # Änderungen speichern
         persist_session(update)
         context.user_data["swapped_indices"] = swapped_slots
 
-        if show_debug_for(update):
-            gewaehlte_gerichte = df_gerichte[df_gerichte["Gericht"].isin(sessions[uid]["menues"])]
-            aufwand_counter = Counter(gewaehlte_gerichte["Aufwand"])
-            aufwand_text    = ", ".join(f"{v} x {k}" for k, v in aufwand_counter.items())
-            kitchen_counter    = Counter(gewaehlte_gerichte["Küche"])
-            kitchen_text       = ", ".join(f"{v} x {k}" for k, v in kitchen_counter.items())
-            typ_counter     = Counter(gewaehlte_gerichte["Typ"])
-            typ_text        = ", ".join(f"{v} x {k}" for k, v in typ_counter.items())
-            einschr_counter = Counter(gewaehlte_gerichte["Ernährungsstil"])
-            einschr_text    = ", ".join(f"{v} x {k}" for k, v in einschr_counter.items())
-
-            debug_msg = (
-                f"\n📊 Aufwand-Verteilung: {aufwand_text}"
-                f"\n🎨 Küche-Verteilung:    {kitchen_text}"
-                f"\n⚙️ Typ-Verteilung:      {typ_text}"
-                f"\n🥗 Ernährungsstil:       {einschr_text}"
+        # 2) Tauschfrage (diese Nachricht) entfernen + aus flow_msgs austragen
+        try:
+            await context.bot.delete_message(
+                chat_id=q.message.chat.id,
+                message_id=q.message.message_id
             )
-            msg_debug = await q.message.reply_text(debug_msg)
-            context.user_data["flow_msgs"].append(msg_debug.message_id)
+        except Exception:
+            pass
+        flow_ids = context.user_data.get("flow_msgs", [])
+        if isinstance(flow_ids, list):
+            try:
+                flow_ids.remove(q.message.message_id)
+            except ValueError:
+                pass
 
-
-
-        # 3) Neue Liste als eigene Nachricht senden + tracken
-        menutext = "\n".join(f"{i}. {g}" for i, g in enumerate(menues, 1))
-        msg1 = await q.message.reply_text(pad_message(f"🥣 Deine Gerichte:\n{menutext}"))
-        context.user_data["flow_msgs"].append(msg1.message_id)
-
-        # 4) Frage separat senden + tracken
-        confirm_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="swap_ok"),
-            InlineKeyboardButton("Nein", callback_data="swap_again"),
-        ]])
-        msg2 = await q.message.reply_text(pad_message("Passen diese Gerichte?"), reply_markup=confirm_kb)
-        context.user_data["flow_msgs"].append(msg2.message_id)
-
+        # 4) Debug + Karte IMMER als Paar neu rendern → Debug garantiert darüber
+        dishes = sessions[uid]["menues"]
+        await render_proposal_with_debug(
+            update, context,
+            title="Neuer Vorschlag:",
+            dishes=dishes,
+            buttons=[
+                [InlineKeyboardButton("Passt", callback_data="swap_ok"),
+                 InlineKeyboardButton("Austauschen", callback_data="swap_again")]
+            ],
+            replace_old=True
+        )
         return TAUSCHE_CONFIRM
+
+
+
 
 
 
@@ -2822,87 +3521,53 @@ async def tausche_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid     = str(q.from_user.id)
 
     if q.data == "swap_again":
-        # 1) Visuelles Feedback zurücksetzen
-        await mark_yes_no(q, False, "swap_ok", "swap_again")
-
-        # 2) Swap-Selection-State komplett löschen
+        # Kein Umschalten der Buttons – nur den Auswahl-Flow neu starten
         context.user_data["swap_candidates"] = set()
 
-        # 3) Nur die letzte Frage löschen (nicht die Auswahl-Liste)
+        # Nur die letzte Frage löschen (nicht die Liste/den Vorschlag)
         flow = context.user_data.get("flow_msgs", [])
         if flow:
             last_id = flow.pop()
             try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
                 pass
 
-        # 4) Neuer Tausche-Prompt mit leerem Kandidaten-Set
         kb = build_swap_keyboard(sessions[uid]["menues"], context.user_data["swap_candidates"])
-        msg = await q.message.reply_text(
-            pad_message("Welche Gerichte möchtest Du tauschen?"),
-            reply_markup=kb
-        )
+        msg = await q.message.reply_text(pad_message("Welche Gerichte möchtest Du tauschen?"), reply_markup=kb)
         context.user_data["flow_msgs"].append(msg.message_id)
         return TAUSCHE_SELECT
 
 
     if q.data == "swap_ok":
-        await mark_yes_no(q, True, "swap_ok", "swap_again")
-        # nur letzte Frage löschen
+        # Buttons der Vorschlagskarte entfernen (kein Umschalten auf "Ja/Nein")
         flow = context.user_data.get("flow_msgs", [])
         if flow:
             last_id = flow.pop()
             try:
-                await context.bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
                 pass
+
+        # 🔑 Ephemere Keys sicher resetten (sonst alte Auswahl hängen geblieben)
+        for k in ("menu_list", "to_process", "menu_idx", "allowed_beilage_codes", "selected_menus"):
+            context.user_data.pop(k, None)
 
         # jetzt gleiche Beilagen-Logik wie oben in menu_confirm_cb:
         menus = sessions[uid]["menues"]
-        side_menus = []
-        for idx, dish in enumerate(menus):
-            raw = df_gerichte.loc[df_gerichte["Gericht"] == dish, "Beilagen"].iloc[0]
-            codes = [c for c in parse_codes(raw) if c != 0]
-            if codes:
-                side_menus.append(idx)
-
-        # 0 Beilagen-Menüs
+        side_menus = [idx for idx, dish in enumerate(menus) if allowed_sides_for_dish(dish)]
+        
         if not side_menus:
-            for mid in context.user_data.get("flow_msgs", []):
-                try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-                except:
-                    pass
-            context.user_data["flow_msgs"].clear()
+            return await show_final_dishes_and_ask_persons(update, context, step=2)
+            
+        await render_beilage_precheck_debug(update, context, menus, prefix="DEBUG Beilagenvorprüfung (nach Tausch):")
 
-            text = "🥣 Deine finale Liste:\n"
-            for dish in menus:
-                nums       = sessions[uid].get("beilagen", {}).get(dish, [])
-                side_names = df_beilagen.loc[df_beilagen["Nummer"].isin(nums), "Beilagen"].tolist()
-                text      += f"- {format_dish_with_sides(dish, side_names)}\n"
-            msg = await q.message.reply_text(pad_message(text))
-            context.user_data["flow_msgs"].append(msg.message_id)
-            return await ask_for_persons(update, context)
+        return await ask_beilagen_yes_no(q.message, context)
+# CODE SCHLUSS
 
-        # 1 Beilagen-Menü
-        if len(side_menus) == 1:
-            context.user_data["menu_list"] = menus
-            context.user_data["to_process"] = side_menus
-            context.user_data["menu_idx"]    = 0
-            return await ask_beilagen_for_menu(q, context)
-
-        # >1 Beilagen-Menüs
-        context.user_data["menu_list"] = menus
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="ask_yes"),
-            InlineKeyboardButton("Nein", callback_data="ask_no"),
-        ]])
-        msg = await q.message.reply_text(pad_message("Möchtest du Beilagen hinzufügen?"), reply_markup=kb)
-        context.user_data["flow_msgs"].append(msg.message_id)
-        return ASK_BEILAGEN
 
     return ConversationHandler.END
+
 
 
 
@@ -2921,32 +3586,33 @@ async def fertig_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_session_loaded_for_user_and_chat(update)
-    # Personenzahl: zuerst aus context.user_data (Buttons), sonst aus Text
     user_id = str(update.effective_user.id)
+    chat_id = update.effective_chat.id
+
+    # Personenzahl: Buttons (temp_persons) bevorzugen, sonst Text
     if "temp_persons" in context.user_data:
         personen = context.user_data.pop("temp_persons")
     else:
         try:
             personen = int(update.message.text.strip())
             if personen <= 0:
-                       raise ValueError
+                raise ValueError
         except:
             await update.message.reply_text("⚠️ Ungültige Zahl.")
             return PERSONS_MANUAL
 
-
     faktor = personen / 4
-    # 1) Zutaten für Hauptgerichte
     df = df_zutaten
     ausgew = sessions[user_id]["menues"]
     context.user_data["final_list"] = ausgew
 
+    # Hauptgerichte
     zut_gericht = df[
         (df["Typ"] == "Gericht") &
         (df["Gericht"].isin(ausgew))
     ].copy()
 
-    # === neu: Zutaten aller gewählten Beilagen sammeln ===
+    # Beilagen
     all_nums = sum(sessions[user_id].get("beilagen", {}).values(), [])
     beilage_names = df_beilagen.loc[df_beilagen["Nummer"].isin(all_nums), "Beilagen"].tolist()
     zut_beilage = df[
@@ -2954,68 +3620,67 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (df["Gericht"].isin(beilage_names))
     ].copy()
 
-    # 2) Beide DataFrames zusammenführen und skalieren
+    # Zusammenführen + skalieren
     zut = pd.concat([zut_gericht, zut_beilage], ignore_index=True)
     zut["Menge"] *= faktor
 
-    #Bei Vegi-Profil: alle Fleisch-Zutaten entfernen
-    profile = profiles.get(user_id)  # oder wie du dein Profil-Objekt ablegst
+    # Vegi-Profil: Fleisch raus
+    profile = profiles.get(user_id)
     if profile and profile.get("restriction") == "Vegi":
         zut = zut[zut["Kategorie"] != "Fleisch"]
 
-
-
-    # --- Emoji-Gruppierte Einkaufsliste ---
+    # ---- Einkaufsliste (gruppiert) ----
     eink = (
         zut.groupby(["Zutat", "Kategorie", "Einheit"])
-        .agg(
-            Menge     = ("Menge",     "sum"),
-            Menge_raw = ("Menge_raw", "first")
-        )
+        .agg(Menge=("Menge", "sum"), Menge_raw=("Menge_raw", "first"))
         .reset_index()
         .sort_values(["Kategorie", "Zutat"])
     )
 
-    eink_text = f"\n<b><u>🛒 Einkaufsliste für {personen} Personen:</u></b>\n"
-    # nach Kategorie gruppieren
+    eink_text = f"\n<b>🛒 <u>Einkaufsliste für {personen} Personen:</u></b>\n"
     for cat, group in eink.groupby("Kategorie"):
         emoji = CAT_EMOJI.get(cat, "")
         eink_text += f"\n{emoji} <u>{escape(str(cat))}</u>\n"
         for _, r in group.iterrows():
             raw = str(r["Menge_raw"]).strip()
-            if not raw.replace(".", "").isdigit():  # kein reiner Zahl‐String
+            if not raw.replace(".", "").isdigit():
                 txt = raw or "wenig"
-                line = f"- {r.Zutat}: {txt}"
+                line = f"‣ {r.Zutat}: {txt}"
             else:
-                amt  = format_amount(r.Menge)
-                line = f"- {r.Zutat}: {amt} {r.Einheit}"
+                amt2, unit2 = normalize_quantity(float(r["Menge"]), str(r["Einheit"]))
+                amt = format_amount(amt2)
+                line = f"‣ {r['Zutat']}: {amt} {unit2}"
             eink_text += f"{line}\n"
 
-
-   
     # --- Kochliste mit Hauptgericht- und Beilagen-Zutaten in der richtigen Reihenfolge ---
     koch_text = f"\n<b><u>🍽 Kochliste für {personen} Personen:</u></b>\n"
 
+    # Schnelle Lookups für Link & Aufwand
+    _link_by_dish    = df_gerichte.set_index("Gericht")["Link"].to_dict()
+    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+    # Session-Aufwand (falls vorhanden) hat Vorrang
+    _aufwand_session = {}
+    try:
+        _aufwand_session = {d: lv for d, lv in zip(ausgew, sessions[user_id].get("aufwand", []))}
+    except Exception:
+        _aufwand_session = {}
+
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+
     for g in ausgew:
-        # 1) Namen der gewählten Beilagen holen
+        # 1) Beilagen-Namen zum Gericht
         sel_nums       = sessions[user_id].get("beilagen", {}).get(g, [])
-        beilagen_namen = df_beilagen.loc[
-            df_beilagen["Nummer"].isin(sel_nums), "Beilagen"
-        ].tolist()
+        beilagen_namen = df_beilagen.loc[df_beilagen["Nummer"].isin(sel_nums), "Beilagen"].tolist()
 
-        # 2) Zutaten für Hauptgericht
+        # 2) Zutaten für Hauptgericht + Beilagen in Reihenfolge zusammenführen
         part_haupt = zut[(zut["Typ"] == "Gericht") & (zut["Gericht"] == g)]
-
-        # 3) Zutaten für jede Beilage nacheinander
         parts_list = [part_haupt]
         for b in beilagen_namen:
             part_b = zut[(zut["Typ"] == "Beilagen") & (zut["Gericht"] == b)]
             parts_list.append(part_b)
-
-        # 4) Zusammenführen
         part = pd.concat(parts_list, ignore_index=True)
 
-        # 5) Zutaten-Text bauen (HTML-escapen!)
+        # 3) Zutaten-Text (HTML-escapen)
         ze_parts = []
         for _, row in part.iterrows():
             raw = str(row["Menge_raw"]).strip()
@@ -3023,84 +3688,69 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 txt = raw or "wenig"
                 ze_parts.append(f"{row['Zutat']} {txt}")
             else:
-                amt = format_amount(row["Menge"])
-                ze_parts.append(f"{row['Zutat']} {amt} {row['Einheit']}")
-        ze_html = escape(", ".join(ze_parts))                                                                                                                                                    # hier definieren, wie zutaten getrennt werden
+                amt2, unit2 = normalize_quantity(float(row["Menge"]), str(row["Einheit"]))
+                amt = format_amount(amt2)
+                ze_parts.append(f"{row['Zutat']} {amt} {unit2}")
 
-        # 6) Titel bauen: Name fett & verlinkt (falls Link vorhanden), kein "- " mehr davor
+        ze_html = escape(", ".join(ze_parts))
+
+        # 4) Titel: Link (falls vorhanden) + Beilagenzusatz + Aufwand-Label
+        #    a) Link robust (https:// ergänzen, falls fehlt)
+        raw_link = normalize_link(str(_link_by_dish.get(g, "") or ""))
+
+        #    b) Haupttitel (Link außen, Bold innen: <a><b>…</b></a>)
+        name_html = f"<b>{escape(g)}</b>"
+        if raw_link:
+            name_html = f'<a href="{escape(raw_link, quote=True)}"><b>{escape(g)}</b></a>'
+
+        #    c) Zusatz hinter dem Gerichts-Namen (z.B. " mit Reis und Brokkoli")
         full_title = format_dish_with_sides(g, beilagen_namen)
         rest       = full_title[len(g):] if full_title.startswith(g) else ""
+        rest_html  = f"<b>{escape(rest)}</b>" if rest else ""
 
-        # Link aus Gerichte-Tabelle laden (leerer String → kein Link)
-        try:
-            link_value = str(
-                df_gerichte.loc[df_gerichte["Gericht"] == g, "Link"].iloc[0]
-            ).strip()
-        except Exception:
-            link_value = ""
+        #    d) Aufwand zuerst aus der Session, sonst aus df (nur 1/2/3 zulassen)
+        lvl = _aufwand_session.get(g, None)
+        if lvl not in (1, 2, 3):
+            try:
+                lvl = int(_aufwand_by_dish.get(g, 0))
+            except Exception:
+                lvl = 0
 
-        name_html = f"<b>{escape(g)}</b>"
-        if link_value:
-            name_html = f'<b><a href="{escape(link_value, quote=True)}">{escape(g)}</a></b>'
-
-        # Beilagen-Teil nur fett (nie verlinkt)
-        rest_html = f"<b>{escape(rest)}</b>" if rest else ""
-
-        # Aufwand (1/2/3) -> Text und HTML-escapen (wegen < und >)
         aufwand_label_html = ""
-        try:
-            aufwand_raw = df_gerichte.loc[df_gerichte["Gericht"] == g, "Aufwand"].iloc[0]
-            mapping = {"1": "(<30min)", "2": "(30-60min)", "3": "(>60min)"}
-            aufwand_txt = mapping.get(str(aufwand_raw).strip(), "")
-            if aufwand_txt:
-                aufwand_label_html = f"<i>{escape(aufwand_txt)}</i>"
-        except Exception:
-            aufwand_label_html = ""
+        if lvl in _label_map:
+            aufwand_label_html = f"<i>{escape(_label_map[lvl])}</i>"
 
-
-        display_title_html = f"{name_html}{rest_html}{f' {aufwand_label_html}' if aufwand_label_html else ''}"
+        display_title_html = f"{name_html}{rest_html}{(' ' + aufwand_label_html) if aufwand_label_html else ''}"
         koch_text += f"\n{display_title_html}\n{ze_html}\n"
 
+    # Vorschlagskarte ("Mein Vorschlag" / "Neuer Vorschlag") gezielt entfernen
+    await delete_proposal_card(context, chat_id)
 
 
+    # ---- Flow-UI aufräumen (nur flow_msgs) ----
+    await reset_flow_state(update, context, reset_session=False, delete_messages=True, only_keys=["flow_msgs"])
 
-
-    # — alle bisherigen Flow-Nachrichten löschen —
-    chat_id = update.effective_chat.id
-    for mid in context.user_data.get("flow_msgs", []):
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-        except:
-            pass
-    context.user_data["flow_msgs"].clear()
-
-
-    # — Einkaufs- & Kochliste senden —
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text= koch_text + eink_text,
-        parse_mode="HTML",
-        disable_web_page_preview=True
-    )
-
-    # — Für Exporte speichern —
+    # ---- Für Exporte merken ----
     context.user_data["einkaufsliste_df"] = eink
-    context.user_data["kochliste_text"]     = koch_text
+    context.user_data["kochliste_text"]   = koch_text
+    
+    # — Einkaufs- & Kochliste senden + Export-Buttons an dieselbe Nachricht —
 
-    # — Export-Buttons senden —
-    keyboard = InlineKeyboardMarkup([
-        [ InlineKeyboardButton("🔖 Gerichte zu Favoriten hinzufügen", callback_data="favoriten") ],
-        [ InlineKeyboardButton("🛒 Einkaufsliste in Bring! exportieren", callback_data="export_bring") ],
-        [ InlineKeyboardButton("📄 Als PDF exportieren",   callback_data="export_pdf")   ],
-        [ InlineKeyboardButton("🔄 Das passt so. Neustart!", callback_data="restart")      ],
-    ])
-    await context.bot.send_message(
+    # 1) Finale Liste OHNE Buttons senden (bleibt im Chat stehen)
+    sent_list = await context.bot.send_message(
         chat_id=chat_id,
-        text="Deine Listen sind bereit – was möchtest du tun?",
-        reply_markup=keyboard
+        text=koch_text + eink_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
+    # optional: für spätere Referenzen
+    context.user_data["final_list_msg_id"] = sent_list.message_id
+
+    # 2) Aktionsmenü als EIGENE Nachricht direkt darunter senden
+    await send_action_menu(sent_list, context)
 
     return ConversationHandler.END
+
 
 
 ##############################################
@@ -3110,7 +3760,7 @@ async def fertig_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ###################---------------------- Export to Bring--------------------
 
 async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Erstellt HTML-Rezept-Gist → Deeplink → Sendet Bring-Button"""
+    """Erstellt HTML-Recipe-Gist → Bring-Deeplink. Ersetzt das Aktionsmenü (nicht die Liste)."""
     query = update.callback_query
     await query.answer()
 
@@ -3119,11 +3769,22 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Keine Einkaufsliste gefunden.")
         return ConversationHandler.END
 
-    # --- 1) JSON-LD aufbereiten -------------------------------------------
-    recipe_ingredients = [
-        f"{format_amount(r.Menge)} {r.Einheit} {r.Zutat}"
-        for _, r in eink.iterrows()
-    ]
+    # --- JSON-LD vorbereiten (stabil sortiert) ---
+    eink_sorted = (
+        eink.copy()
+        .assign(Kategorie=lambda d: d["Kategorie"].fillna("Sonstiges"))
+        .sort_values(["Kategorie", "Zutat"], kind="mergesort")
+    )
+    recipe_ingredients = []
+    for _, r in eink_sorted.iterrows():
+        raw = str(r["Menge_raw"]).strip()
+        if raw and not raw.replace(".", "").isdigit():
+            # Freitext-Menge (z. B. "1 Dose")
+            recipe_ingredients.append(f"{raw} {r['Zutat']}".strip())
+        else:
+            amt2, unit2 = normalize_quantity(float(r["Menge"]), str(r["Einheit"]))
+            recipe_ingredients.append(f"{format_amount(amt2)} {unit2} {r['Zutat']}".strip())
+
     recipe_jsonld = {
         "@context": "https://schema.org",
         "@type":    "Recipe",
@@ -3131,7 +3792,6 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "author":   {"@type": "Organization", "name": "FoodApp"},
         "recipeIngredient": recipe_ingredients,
     }
-
     html_content = (
         "<!doctype html><html><head>"
         "<meta charset='utf-8'>"
@@ -3139,19 +3799,17 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{json.dumps(recipe_jsonld, ensure_ascii=False)}</script>"
         "</head><body></body></html>"
     )
-
     logging.info("Bring-Import JSON: %s", json.dumps(recipe_jsonld, ensure_ascii=False))
 
-    # --- 2) Öffentlichen Gist anlegen --------------------------------------
     if not GITHUB_TOKEN:
         await query.edit_message_text(
             "❌ Kein GitHub-Token gefunden (Umgebungsvariable GITHUB_TOKEN). "
             "Ohne öffentliches Rezept kann Bring! nichts importieren."
         )
+        # die editierte Nachricht ist bereits „Fehler“-Text; wir müssen sie nicht speziell tracken
         return ConversationHandler.END
 
-    headers = {"Authorization": f"token {GITHUB_TOKEN}",
-               "Accept": "application/vnd.github+json"}
+    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
     gist_payload = {
         "description": "FoodApp – temporärer Bring-Recipe-Import",
         "public": True,
@@ -3159,26 +3817,19 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     try:
-        gist_resp = await HTTPX_CLIENT.post(
-            "https://api.github.com/gists",
-            json=gist_payload,
-            headers=headers,
-        )
+        gist_resp = await HTTPX_CLIENT.post("https://api.github.com/gists", json=gist_payload, headers=headers)
         gist_resp.raise_for_status()
         raw_url = gist_resp.json()["files"]["recipe.html"]["raw_url"]
 
-        # --- 3) Deeplink von Bring holen --------------------------------
         dl_resp = await HTTPX_CLIENT.get(
             "https://api.getbring.com/rest/bringrecipes/deeplink",
             params={"url": raw_url, "source": "web"},
             follow_redirects=False,
         )
-
-
         if dl_resp.status_code in (301, 302, 303, 307, 308):
             deeplink = dl_resp.headers.get("location")
         else:
-            dl_resp.raise_for_status()          # echte Fehler
+            dl_resp.raise_for_status()
             deeplink = dl_resp.json().get("deeplink")
 
         if not deeplink:
@@ -3188,42 +3839,42 @@ async def export_to_bring(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except (httpx.HTTPError, RuntimeError) as err:
         logging.error("Fehler bei Bring-Export: %s", err)
-        await query.edit_message_text(
-            "❌ Bring-Export fehlgeschlagen. Versuche es später erneut."
-        )
+        await query.edit_message_text("❌ Bring-Export fehlgeschlagen. Versuche es später erneut.")
         return ConversationHandler.END
 
-    # --- 4) Button senden & Conversation beenden ---------------------------
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("In Bring! importieren", url=deeplink)]]
-    )
-    await query.edit_message_text(
-        "🛒 Einkaufsliste an Bring! senden:",
-        reply_markup=kb
-    )
-    await send_action_menu(query.message)
+    # Aktionsmenü-Nachricht in Bring-Button umwandeln (und ID merken fürs spätere Löschen beim Neustart)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("In Bring! importieren", url=deeplink)]])
+    await query.edit_message_text("🛒 Einkaufsliste an Bring! senden:", reply_markup=kb)
+    _track_export_msg(context, query.message.message_id)
+
+    # Neues Aktionsmenü darunter erneut anbieten
+    await send_action_menu(query.message, context)
     return EXPORT_OPTIONS
+
 
 
 ###################---------------------- PDF Export--------------------
 
 async def export_to_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fragt, welche Listen exportiert werden sollen."""
+    """Fragt, welche Listen exportiert werden sollen. Ersetzt das Aktionsmenü (nicht die Liste).”
+    """
     query = update.callback_query
     await query.answer()
 
     eink_df   = context.user_data.get("einkaufsliste_df")
     koch_text = context.user_data.get("kochliste_text")
     if eink_df is None or eink_df.empty or not koch_text:
-        return await query.edit_message_text("❌ Keine Listen zum Export gefunden.")
+        await query.edit_message_text("❌ Keine Listen zum Export gefunden.")
+        return ConversationHandler.END
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Einkaufsliste", callback_data="pdf_export_einkauf")],
         [InlineKeyboardButton("Kochliste",     callback_data="pdf_export_koch")],
-        [InlineKeyboardButton("Beides",       callback_data="pdf_export_beides")],
+        [InlineKeyboardButton("Beides",        callback_data="pdf_export_beides")],
     ])
     await query.edit_message_text("Was brauchst Du im PDF Export?", reply_markup=kb)
     return PDF_EXPORT_CHOICE
+
 
 
 class PDF(FPDF):
@@ -3263,48 +3914,39 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
 
     # PDF initialisieren (mit Kopf-/Fußzeile und 2 cm Rändern)
     date_str = datetime.now().strftime("%d.%m.%Y")
-    pdf = PDF(date_str)  # <<--- WICHTIG: unsere Unterklasse benutzen
-    # Fonts optional – mit Fallback auf Core-Fonts
+    pdf = PDF(date_str)  # unsere Unterklasse
     try:
         pdf.add_font("DejaVu", "",  "fonts/DejaVuSans.ttf")
         pdf.add_font("DejaVu", "B", "fonts/DejaVuSans-Bold.ttf")
         pdf.add_page()
     except Exception:
-        pdf.add_page()  # Core-Fonts (Helvetica) werden bereits verwendet
+        pdf.add_page()
 
-
-    # ---------- Helper: KOCHLISTE (zweizeilig: Titel-Zeile, Zutaten-Zeile) ----------
+    # ---------- Helper: KOCHLISTE ----------
     def write_kochliste():
         pdf.set_font("DejaVu", "B", 14)
         pdf.cell(0, 10, "Kochliste", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # Header-Zeile(n) und Leerzeilen robust entfernen
         raw_lines = koch_text.splitlines()
         lines = []
         for l in raw_lines:
             if not l.strip():
                 continue
             plain = unescape(re.sub(r"<[^>]+>", "", l))
-            if "Kochliste" in plain:  # filtert z.B. "<b><u>🍽 Kochliste …</u></b>"
+            if "Kochliste" in plain:
                 continue
             lines.append(l)
 
-        # Paarbildung: (Titel, Zutaten)
         last_title = None
         for l in lines:
             if last_title is None:
                 last_title = l
                 continue
 
-            title_html = last_title
-            ingredients_html = l
+            title_plain       = unescape(re.sub(r"<[^>]+>", "", last_title))
+            ingredients_plain = unescape(re.sub(r"<[^>]+>", "", l))
             last_title = None
 
-            # HTML → Plaintext
-            title_plain       = unescape(re.sub(r"<[^>]+>", "", title_html))
-            ingredients_plain = unescape(re.sub(r"<[^>]+>", "", ingredients_html))
-
-            # Ausgabe
             pdf.set_x(pdf.l_margin)
             pdf.set_font("DejaVu", "B", 12)
             pdf.multi_cell(pdf.epw, 8, title_plain, align="L")
@@ -3314,7 +3956,6 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
             pdf.multi_cell(pdf.epw, 8, ingredients_plain, align="L")
             pdf.ln(2)
 
-        # Falls am Ende eine Titelzeile ohne Zutaten übrig bleibt
         if last_title is not None:
             title_plain = unescape(re.sub(r"<[^>]+>", "", last_title))
             pdf.set_x(pdf.l_margin)
@@ -3322,21 +3963,17 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
             pdf.multi_cell(pdf.epw, 8, title_plain, align="L")
             pdf.ln(2)
 
-    # ---------- Helper: EINKAUFSLISTE (2 Spalten, Kategorien als Überschriften) ----------
+    # ---------- Helper: EINKAUFSLISTE ----------
     def write_einkaufsliste():
-        # Überschrift
         pdf.set_font("DejaVu", "B", 14)
         pdf.cell(0, 10, "Einkaufsliste", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
-        # Spalten-Setup
         col_gap = 8
         col_w   = (pdf.epw - col_gap) / 2
         left_x  = pdf.l_margin
         right_x = pdf.l_margin + col_w + col_gap
-        start_y = pdf.get_y()  # Start nach der Überschrift
-        col     = 0            # 0 = links, 1 = rechts
-        pdf.set_xy(left_x, start_y)  # <<— harte Positionierung auf Spaltenanfang
-
+        start_y = pdf.get_y()
+        col     = 0
 
         def current_x():
             return left_x if col == 0 else right_x
@@ -3347,15 +3984,12 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
         def switch_column():
             nonlocal col, start_y, left_x, right_x, col_w
             if col == 0:
-                # auf rechte Spalte derselben Seite
                 col = 1
                 pdf.set_xy(right_x, start_y)
             else:
-                # neue Seite + Überschrift + wieder linke Spalte
                 pdf.add_page()
                 pdf.set_font("DejaVu", "B", 14)
                 pdf.cell(0, 10, "Einkaufsliste", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-                # Neu berechnen (Seitenbreite kann sich u.U. geändert haben)
                 col_w   = (pdf.epw - col_gap) / 2
                 left_x  = pdf.l_margin
                 right_x = pdf.l_margin + col_w + col_gap
@@ -3364,138 +3998,473 @@ async def process_pdf_export_choice(update: Update, context: ContextTypes.DEFAUL
                 pdf.set_xy(left_x, start_y)
 
         def ensure_space(height_needed: float):
-            # wenn das Element nicht mehr in die aktuelle Spalte passt → Spaltenwechsel/Seitenwechsel
             if pdf.get_y() + height_needed <= page_bottom():
                 return
             switch_column()
 
         def calc_item_height(txt: str, line_h: float = 6.0) -> float:
-            # grobe Zeilenanzahl anhand Textbreite
             width = pdf.get_string_width(txt)
             lines = max(1, math.ceil(width / col_w)) if col_w > 0 else 1
             return lines * line_h
 
-        # nach Kategorie gruppiert (wie im Chat), Items darunter
-        # Hinweis: CAT_EMOJI & format_amount sind global definert. :contentReference[oaicite:2]{index=2}
         pdf.set_font("DejaVu", "", 12)
         for cat, group in eink_df.sort_values(["Kategorie", "Zutat"]).groupby("Kategorie"):
-            # Kategorie-Überschrift (exakt linksbündig in der Spalte)
             head = str(cat)
             ensure_space(8)
             pdf.set_font("DejaVu", "B", 12)
-            pdf.set_x(current_x())  # nur X setzen, Y unverändert lassen
+            pdf.set_x(current_x())
             pdf.multi_cell(col_w, 8, head, align="L")
-            pdf.set_x(current_x())  # nach MultiCell X wieder exakt auf Spaltenanfang
+            pdf.set_x(current_x())
             pdf.set_font("DejaVu", "", 12)
 
-
-
-            # Items der Kategorie
             for _, row in group.iterrows():
                 raw = str(row["Menge_raw"]).strip()
                 if not raw.replace(".", "").isdigit():
                     txt  = raw or "wenig"
-                    line = f"- {row['Zutat']}: {txt}"
+                    line = f"▪ {row['Zutat']}: {txt}"
                 else:
                     amt  = format_amount(row["Menge"])
-                    line = f"- {row['Zutat']}: {amt} {row['Einheit']}"
+                    line = f"▪ {row['Zutat']}: {amt} {row['Einheit']}"
 
                 h = calc_item_height(line, line_h=6)
                 ensure_space(h)
                 pdf.set_xy(current_x(), pdf.get_y())
                 pdf.multi_cell(col_w, 6, line, align="L")
 
-            # kleiner Abstand nach jeder Kategorie
             ensure_space(2)
             pdf.set_xy(current_x(), pdf.get_y() + 2)
 
-    # ---------- Reihenfolge je nach Wahl ----------
+    # --- Ausgabereihenfolge je nach Wahl ---
     if choice == "koch":
         write_kochliste()
     elif choice == "einkauf":
         write_einkaufsliste()
-    else:  # "beides" → Kochliste zuerst, dann Seitenumbruch, dann Einkaufsliste
+    else:
         write_kochliste()
         pdf.add_page()
         write_einkaufsliste()
 
     # --- Speichern & Senden ---
-    filename = f"liste_{q.from_user.id}.pdf"
-    pdf.output(filename)
-    await q.edit_message_text("📄 Hier ist dein PDF:")
-    with open(filename, "rb") as f:
-        await q.message.reply_document(document=f, filename="Liste.pdf")
-    os.remove(filename)
+    tmp_filename = f"liste_{q.from_user.id}.pdf"   # interner Temp-Dateiname
+    pdf.output(tmp_filename)
 
-    # sende allgemeines Aktions-Menu und kehre in den EXPORT_OPTIONS-State zurück
-    await send_action_menu(q.message)
+    # Aktionsmenü-Nachricht in "Hier ist dein PDF:" umwandeln und ID merken
+    await q.edit_message_text("📄 Hier ist dein PDF:")
+    _track_export_msg(context, q.message.message_id)
+
+    # Download-Name wie gewünscht: "Foodylenko - TT.MM.YY.pdf"
+    date_disp = datetime.now().strftime("%d.%m.%y")
+    with open(tmp_filename, "rb") as f:
+        pdf_msg = await q.message.reply_document(document=f, filename=f"Foodylenko - {date_disp}.pdf")
+    os.remove(tmp_filename)
+
+    # Auch die PDF-Dokument-Nachricht fürs spätere Löschen merken
+    _track_export_msg(context, pdf_msg.message_id)
+
+    # Danach neues Aktionsmenü
+    await send_action_menu(q.message, context)
     return EXPORT_OPTIONS
+
 
 
 ###################---------------------- NEUSTART FLOW--------------------
 
 
 async def restart_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry-Point für Neustart-Button: fragt nach Bestätigung."""
+    """Entry-Point für Neustart-Button: fragt nach Bestätigung.
+       Lässt das Aktionsmenü stehen und sendet die Bestätigungsfrage darunter.
+    """
     q = update.callback_query
     await q.answer()
-    text = "🔄 Bist Du sicher? Die Gerichtsauswahl wird zurückgesetzt (Favoriten bleiben bestehen)"
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Ja",   callback_data="restart_yes"),
-        InlineKeyboardButton("Nein", callback_data="restart_no"),
-    ]])
-    await q.edit_message_text(text, reply_markup=kb)
+
+    text = pad_message("🔄 Bist Du sicher?")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ja",   callback_data="restart_yes"),
+         InlineKeyboardButton("Nein", callback_data="restart_no")]
+    ])
+    confirm = await context.bot.send_message(
+        chat_id=q.message.chat.id,
+        text=text,
+        reply_markup=kb
+    )
+    # ID merken, damit wir bei "Nein" nur diese Frage löschen können
+    context.user_data["restart_confirm_msg_id"] = confirm.message_id
     return RESTART_CONFIRM
 
 
 
-async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def restart_start_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Restart-Bestätigung aus der ÜBERSICHT.
+    Wichtig: Übersicht NICHT editieren – neue Nachricht als Reply zur Übersicht posten.
+    """
     q = update.callback_query
     await q.answer()
     chat_id = q.message.chat.id
 
-    # 1) Lösche die Bestätigungs-Nachricht
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
-    except:
-        pass
+    confirm_text = pad_message("🔄 Bist Du sicher?")
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Ja",   callback_data="restart_yes_ov"),
+        InlineKeyboardButton("Nein", callback_data="restart_no_ov"),
+    ]])
 
-    # 2) Bei "Ja": Abschied, kurze Pause, dann Start-Übersicht
-    if q.data == "restart_yes":
-        bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
-        await asyncio.sleep(1)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=confirm_text,
+        reply_markup=kb
+    )
+    return ConversationHandler.END
 
-        # Abschieds-Nachricht entfernen
+async def restart_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Globaler /restart: zeigt wie bei den Buttons eine Bestätigungsfrage an."""
+    chat_id = update.effective_chat.id
+    text = pad_message("🔄 Bist Du sicher?")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ja",   callback_data="restart_yes"),
+         InlineKeyboardButton("Nein", callback_data="restart_no")]
+    ])
+    confirm = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    # wichtig: ID merken – wird von restart_confirm_cb genutzt
+    context.user_data["restart_confirm_msg_id"] = confirm.message_id
+    return RESTART_CONFIRM
+
+
+async def restart_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Bestätigung für 'Das passt so. Neustart!' am Prozessende."""
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat.id
+    data = q.data  # 'restart_yes' | 'restart_no'
+
+    # ggf. zuvor gesendete Bestätigungsfrage entfernen
+    confirm_id = context.user_data.pop("restart_confirm_msg_id", None)
+
+    if data == "restart_no":
+        if confirm_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=confirm_id)
+            except Exception:
+                pass
+        # Aktionsmenü bleibt stehen; keine neuen Buttons senden
+        return EXPORT_OPTIONS
+
+    # === restart_yes ===
+    if confirm_id:
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
-        except:
+            await context.bot.delete_message(chat_id=chat_id, message_id=confirm_id)
+        except Exception:
             pass
 
-        overview = (
-            "Übersicht der Befehle:\n\n"
-            "🍲 Menü – Lass Dir leckere Gerichte vorschlagen\n\n"
-            "⚡ QuickOne – Ein Gericht ohne Einschränkungen\n\n"
-            "🔖 Favoriten – Deine Favoriten\n\n"
-            "🛠️ Übersicht – Alle Funktionen"
+    # 1) Aktions-/Export-Nachrichten entfernen
+    for mid in context.user_data.get("export_msgs", []):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    context.user_data["export_msgs"] = []
+
+    # 2) Vorschlagskarte gezielt entfernen
+    await delete_proposal_card(context, chat_id)
+
+    # 3) Alle bekannten UI-Listen JETZT leeren (damit später nichts „nachträglich“ löscht)
+    for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]:
+        ids = context.user_data.get(key, [])
+        for mid in ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data[key] = []
+    # Ein paar Marker zurücksetzen
+    for key in ["proposal_msg_id", "final_list_msg_id"]:
+        context.user_data.pop(key, None)
+
+    # 4) Session wirklich zurücksetzen (neuer Lauf!)
+    uid = str(update.effective_user.id)
+    if uid in sessions:
+        del sessions[uid]
+    try:
+        ckey = chat_key(int(update.effective_chat.id))
+        store_delete_session(ckey)
+    except Exception:
+        pass
+
+    # 5) QuickOne-Pool beenden
+    context.user_data.pop("quickone_remaining", None)
+
+    # 6) kurzer Abschiedsgruß → danach IN-PLACE in Neustart-Banner verwandeln
+    try:
+        bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
+        await asyncio.sleep(1.2)
+
+        banner = build_new_run_banner()
+        # Wichtiges Caveat: Diese Nachricht NICHT in export_msgs tracken!
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=bye.message_id,
+            text=pad_message(banner),
         )
-        await context.bot.send_message(chat_id, overview)
+        context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
+        await asyncio.sleep(1.0)
+    except Exception:
+        # Fallback: wenn Edit scheitert → Bye (falls möglich) löschen und Banner frisch posten
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+        except Exception:
+            pass
+        try:
+            banner = build_new_run_banner()
+            await context.bot.send_message(chat_id, pad_message(banner))
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass
 
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🍲 Menü",      callback_data="restart_menu"),
-            InlineKeyboardButton("⚡ QuickOne",  callback_data="restart_quickone")],
-            [InlineKeyboardButton("🔖 Favoriten", callback_data="restart_favs"),
-            InlineKeyboardButton("🛠️ Übersicht", callback_data="restart_setup"),
-        ]])
-        await context.bot.send_message(chat_id, pad_message("Wähle eine Option:"), reply_markup=kb)
 
+    await send_overview(chat_id, context)
+    return ConversationHandler.END
+
+
+async def restart_confirm_ov(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Bestätigung für '🔄 Restart' aus der Übersicht."""
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat.id
+    data = q.data  # 'restart_yes_ov' | 'restart_no_ov'
+
+    # Bestätigungsfrage entfernen
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=q.message.message_id)
+    except Exception:
+        pass
+
+    if data == "restart_yes_ov":
+        # gleiche Aufräumlogik wie im anderen Restart
+        await delete_proposal_card(context, chat_id)
+
+        for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs", "export_msgs"]:
+            ids = context.user_data.get(key, [])
+            for mid in ids:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+            context.user_data[key] = []
+        for key in ["proposal_msg_id", "final_list_msg_id"]:
+            context.user_data.pop(key, None)
+
+        uid = str(update.effective_user.id)
+        if uid in sessions:
+            del sessions[uid]
+        try:
+            ckey = chat_key(int(update.effective_chat.id))
+            store_delete_session(ckey)
+        except Exception:
+            pass
+
+        context.user_data.pop("quickone_remaining", None)
+
+        # Abschiedsgruß → danach IN-PLACE in Neustart-Banner verwandeln
+        try:
+            bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
+            await asyncio.sleep(1.3)
+
+            banner = build_new_run_banner()
+            # Wichtiges Caveat: Diese Nachricht NICHT in export_msgs tracken!
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=bye.message_id,
+                text=pad_message(banner),
+            )
+            context.user_data.pop("quickone_remaining", None)  # Pool des Durchgangs beenden
+            await asyncio.sleep(1.0)
+        except Exception:
+            # Fallback: wenn Edit scheitert → Bye (falls möglich) löschen und Banner frisch posten
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)
+            except Exception:
+                pass
+            try:
+                banner = build_new_run_banner()
+                await context.bot.send_message(chat_id, pad_message(banner))
+                await asyncio.sleep(1.0)
+            except Exception:
+                pass
+
+
+        await send_overview(chat_id, context)
         return ConversationHandler.END
 
-    # 3) Bei "Nein": wie nach Export/Bring/Favoriten-Flow ins Aktions-Menu
-    #    ("Was möchtest Du weiter tun?" + Favoriten/Bring/PDF/Restart-Buttons)
-    await send_action_menu(q.message)
-    return EXPORT_OPTIONS
+    # data == 'restart_no_ov'
+    return ConversationHandler.END
 
 
+
+
+async def restart_cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Globaler /restart: sofort neu starten (ohne Rückfrage), überall wirksam."""
+    chat_id = update.effective_chat.id
+    uid     = str(update.effective_user.id)
+
+    # 1) Aktions-/Export-Nachrichten entfernen
+    for mid in context.user_data.get("export_msgs", []):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    context.user_data["export_msgs"] = []
+
+    # 2) Vorschlagskarte gezielt entfernen
+    await delete_proposal_card(context, chat_id)
+
+    # 3) Alle bekannten UI-Listen leeren
+    for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]:
+        ids = context.user_data.get(key, [])
+        for mid in ids:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data[key] = []
+    for key in ["proposal_msg_id", "final_list_msg_id"]:
+        context.user_data.pop(key, None)
+
+    # 4) Session & QuickOne-Pool zurücksetzen
+    if uid in sessions:
+        del sessions[uid]
+    try:
+        ckey = chat_key(int(update.effective_chat.id))
+        store_delete_session(ckey)
+    except Exception:
+        pass
+    context.user_data.pop("quickone_remaining", None)
+
+    # 5) Neustart-Banner + Übersicht
+    banner = build_new_run_banner()
+    await context.bot.send_message(chat_id, pad_message(banner))
+    await send_overview(chat_id, context)
+
+###################---------------------- RESET FLOW (/reset) --------------------
+
+async def reset_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /reset – fragt nach Bestätigung und löscht bei 'Ja' Profil, Favoriten
+    und die komplette aktuelle Auswahl (Session). Startet danach wie beim
+    bestätigten Neustart neu.
+    """
+    chat_id = update.effective_chat.id
+    text = pad_message("Möchtest Du wirklich alles zurücksetzen? Profil, Favoriten, Gerichtauswahl?")
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ja", callback_data="reset_yes"),
+         InlineKeyboardButton("Nein", callback_data="reset_no")]
+    ])
+    msg = await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    context.user_data["reset_confirm_msg_id"] = msg.message_id
+    return ConversationHandler.END
+
+
+async def reset_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Bestätigung für /reset:
+    - 'Nein': nur die Bestätigungs-Nachricht entfernen.
+    - 'Ja'  : Profil+Favoriten+Session löschen, UI aufräumen und wie beim bestätigten
+              Neustart neu starten (Banner + Übersicht).
+    """
+    q = update.callback_query
+    await q.answer()
+    chat_id = q.message.chat.id
+    uid = str(update.effective_user.id)
+
+    # Bestätigungsnachricht entfernen (robust)
+    confirm_id = context.user_data.pop("reset_confirm_msg_id", None)
+    if q.data == "reset_no":
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=confirm_id or q.message.message_id)
+        except Exception:
+            pass
+        return ConversationHandler.END
+
+    if q.data == "reset_yes":
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=confirm_id or q.message.message_id)
+        except Exception:
+            pass
+
+        # 1) Aktions-/Export-Nachrichten aufräumen
+        for mid in context.user_data.get("export_msgs", []):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data["export_msgs"] = []
+
+        # 2) Vorschlagskarte gezielt entfernen
+        await delete_proposal_card(context, chat_id)
+
+        # 3) Alle bekannten UI-Listen leeren (Flow-/Profil-/Fav-Nachrichten etc.)
+        for key in ["flow_msgs", "prof_msgs", "fav_msgs", "fav_add_msgs"]:
+            ids = context.user_data.get(key, [])
+            for mid in ids:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+            context.user_data[key] = []
+        for key in ["proposal_msg_id", "final_list_msg_id"]:
+            context.user_data.pop(key, None)
+
+        # 4) Session & QuickOne-Pool zurücksetzen (in-memory + Persistenz pro Chat)
+        try:
+            if uid in sessions:
+                del sessions[uid]
+            ckey = chat_key(int(chat_id))
+            store_delete_session(ckey)
+        except Exception:
+            pass
+        context.user_data.pop("quickone_remaining", None)
+
+        # 5) Favoriten & Profil vollständig zurücksetzen (in-memory + Persistenz)
+        try:
+            # Favoriten
+            ensure_favorites_loaded(uid)
+            favorites[uid] = []
+            store_set_favorites(user_key(int(uid)), favorites[uid])
+        except Exception:
+            pass
+
+        try:
+            # Profil
+            profiles.pop(uid, None)
+            store_set_profile(user_key(int(uid)), {})  # leer speichern
+        except Exception:
+            pass
+
+        # 6) „Neu starten“ wie beim bestätigten Neustart: Bye → Banner → Übersicht
+        try:
+            bye = await context.bot.send_message(chat_id, pad_message("Super, bis bald!👋"))
+            await asyncio.sleep(1.2)
+            banner = build_new_run_banner()
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=bye.message_id,
+                text=pad_message(banner),
+            )
+            await asyncio.sleep(1.0)
+        except Exception:
+            # Fallback: ggf. Bye löschen und Banner neu senden
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=bye.message_id)  # type: ignore[name-defined]
+            except Exception:
+                pass
+            try:
+                banner = build_new_run_banner()
+                await context.bot.send_message(chat_id, pad_message(banner))
+                await asyncio.sleep(1.0)
+            except Exception:
+                pass
+
+        await send_overview(chat_id, context)
+        return ConversationHandler.END
+
+    return ConversationHandler.END
 
 
 ##############################################
@@ -3522,6 +4491,125 @@ async def favorit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===================================== FAVORITEN–FLOW (anschauen & löschen)=============================
+
+def build_fav_overview_text_for(uid: str) -> str:
+    """Erzeugt den Text der initialen Favoriten-Übersicht (wie fav_start)."""
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    _aufwand_by_dish = df_gerichte.set_index("Gericht")["Aufwand"].to_dict()
+
+    # Session-Aufwand hat Vorrang
+    try:
+        sess = sessions.get(uid, {})
+        _aufwand_session = {d: lv for d, lv in zip(sess.get("menues", []), sess.get("aufwand", []))}
+    except Exception:
+        _aufwand_session = {}
+
+    def _effort_level_for(d: str) -> int | None:
+        lvl = _aufwand_session.get(d)
+        if lvl in (1, 2, 3):
+            return int(lvl)
+        try:
+            lvl = int(_aufwand_by_dish.get(d, 0))
+            return lvl if lvl in (1, 2, 3) else None
+        except Exception:
+            return None
+
+    favs = favorites.get(uid, []) or []
+    groups = {1: [], 2: [], 3: []}
+    for d in favs:
+        lvl = _effort_level_for(d)
+        if lvl in (1, 2, 3):
+            groups[lvl].append(d)
+
+    for lvl in (1, 2, 3):
+        groups[lvl].sort(key=lambda s: s.casefold())
+
+    sections = []
+    for lvl in (1, 2, 3):
+        if not groups[lvl]:
+            continue
+        header = f"<u>Aufwand: {escape(_label_map[lvl])}</u>"
+        lines  = "\n".join(f"‣ {escape(d)}" for d in groups[lvl])
+        sections.append(f"{header}\n{lines}")
+
+    txt = pad_message("⭐ <u><b>Deine Favoriten:</b></u>\n\n") + ("\n\n".join(sections) if sections else "(keine Favoriten)")
+    return txt
+
+
+# === FAVORITEN: Overview in-place aktualisieren (Liste immer, Menü optional) ===
+async def fav_render_overview_in_place(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit_menu: bool = False) -> None:
+    """
+    Aktualisiert die bestehende Favoriten-Übersicht in-place.
+    Standard: NUR die Favoritenliste (Text) wird editiert.
+    Das Aktions-Menü („Was möchtest Du machen?“) bleibt stehen.
+    Nur bei edit_menu=True wird auch das Menü in-place editiert.
+    Fallback: wenn Edit fehlschlägt, löschen wir gezielt NUR das betroffene Element
+              und senden es neu (IDs in fav_overview_ids werden entsprechend aktualisiert).
+    """
+    q = update.callback_query
+    uid = str(q.from_user.id)
+    chat_id = q.message.chat.id
+
+    ids = context.user_data.get("fav_overview_ids") or {}
+    list_id = ids.get("list")
+    menu_id = ids.get("menu")
+
+    # Wenn uns IDs fehlen, fallback auf kompletten Neuaufbau:
+    if not list_id or not menu_id:
+        await fav_start(update, context)
+        return
+
+    # 1) neuen Text für die Favoritenliste bauen
+    txt = build_fav_overview_text_for(uid)
+
+    # 2) Favoritenliste IN-PLACE editieren (bevorzugt)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=list_id,
+            text=pad_message(txt)
+        )
+    except Exception:
+        # Fallback: alte Listen-Nachricht löschen und neu senden
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=list_id)
+        except Exception:
+            pass
+        m1 = await context.bot.send_message(chat_id, pad_message(txt))
+        context.user_data.setdefault("fav_overview_ids", {})["list"] = m1.message_id
+        list_id = m1.message_id  # aktualisieren
+
+    # 3) Aktions-Menü optional ebenfalls in-place editieren (Standard: NICHT)
+    if edit_menu:
+        action_text = (
+            "<u><b>Was möchtest Du machen?</b></u>\n\n"
+            "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
+            "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
+            "🔙 <b>Zurück</b> zum Hauptmenü"
+        )
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
+            InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
+            InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back"),
+        ]])
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=menu_id,
+                text=action_text,
+                reply_markup=kb
+            )
+        except Exception:
+            # Fallback: altes Menü löschen und neu senden
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=menu_id)
+            except Exception:
+                pass
+            m2 = await context.bot.send_message(chat_id, action_text, reply_markup=kb)
+            context.user_data.setdefault("fav_overview_ids", {})["menu"] = m2.message_id
+
+        
+
 async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry-Point für /meinefavoriten oder Button „Favoriten“."""
     msg = update.message or update.callback_query.message
@@ -3532,26 +4620,34 @@ async def fav_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["fav_msgs"] = []
 
     if not favs:
-        await msg.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
-        await send_main_buttons(msg)
+        warn = await msg.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
+        await asyncio.sleep(2)
+        try:
+            await context.bot.delete_message(chat_id=msg.chat.id, message_id=warn.message_id)
+        except:
+            pass
         return ConversationHandler.END
 
-    # Übersicht senden und ID speichern
-# Übersicht senden und ID speichern
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {d}" for d in favs)
+    txt = build_fav_overview_text_for(user_id)
+
     m1 = await msg.reply_text(pad_message(txt))
+
+
+    
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Selektieren", callback_data="fav_action_select"),
-        InlineKeyboardButton("Entfernen",   callback_data="fav_action_remove"),
-        InlineKeyboardButton("Zurück",      callback_data="fav_action_back")
+        InlineKeyboardButton("✔️ Selektieren", callback_data="fav_action_select"),
+        InlineKeyboardButton("✖️ Entfernen",   callback_data="fav_action_remove"),
+        InlineKeyboardButton("🔙 Zurück",      callback_data="fav_action_back")
     ]])
     m2 = await msg.reply_text(
-        "Was möchtest Du machen?\n\n"
-        "🤩 Favoriten für Gerichteauswahl *selektieren*\n"
-        "❌ Favoriten aus Liste *entfernen*\n"
-        "⏪ *Zurück* zum Hauptmenü\n"
-        , reply_markup=kb)
+        "<u><b>Was möchtest Du machen?</b></u>\n\n"
+        "✔️ <b>Selektiere</b> Gerichte für die Auswahl\n\n"
+        "✖️ Favoriten aus Liste <b>entfernen</b>\n\n"
+        "🔙 <b>Zurück</b> zum Hauptmenü",
+        reply_markup=kb
+    )
     context.user_data["fav_msgs"].extend([m1.message_id, m2.message_id])
+    context.user_data["fav_overview_ids"] = {"list": m1.message_id, "menu": m2.message_id}
     return FAV_OVERVIEW
 
 
@@ -3594,6 +4690,63 @@ async def fav_overview_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return FAV_DELETE_SELECT
 
+# === Favoriten: Gruppieren + fortlaufend nummerieren (für Select/Remove) ===
+def _effort_level_for_fav(uid: str, dish: str) -> int | None:
+    """
+    Einheitliche Aufwandsbestimmung:
+    1) Session-Aufwand (falls vorhanden) hat Vorrang
+    2) sonst Aufwand aus df_gerichte["Aufwand"]
+    """
+    try:
+        sess = sessions.get(uid, {})
+        for d, lvl in zip(sess.get("menues", []), sess.get("aufwand", [])):
+            if d == dish and lvl in (1, 2, 3):
+                return int(lvl)
+    except Exception:
+        pass
+    try:
+        lvl = int(df_gerichte.set_index("Gericht").at[dish, "Aufwand"])
+        return lvl if lvl in (1, 2, 3) else None
+    except Exception:
+        return None
+
+def _build_numbered_grouped_favs(uid: str) -> tuple[str, dict[int, str]]:
+    """
+    Baut den Text für die Select/Remove-Ansichten:
+      - nach Aufwand gruppiert (1..3)
+      - innerhalb der Gruppen alphabetisch
+      - fortlaufend nummeriert 1..N über alle Gruppen
+    Gibt (text_html, index_map) zurück, wobei index_map[i] -> Gericht
+    """
+    favs = favorites.get(uid, []) or []
+    groups = {1: [], 2: [], 3: []}
+    for d in favs:
+        lvl = _effort_level_for_fav(uid, d)
+        if lvl in (1, 2, 3):
+            groups[lvl].append(d)
+
+    # alphabetisch in jeder Gruppe
+    for lvl in (1, 2, 3):
+        groups[lvl].sort(key=lambda s: s.casefold())
+
+    _label_map = {1: "(<30min)", 2: "(30-60min)", 3: "(>60min)"}
+    lines = []
+    idx_map: dict[int, str] = {}
+    running = 1
+    for lvl in (1, 2, 3):
+        if not groups[lvl]:
+            continue
+        lines.append(f"<u>Aufwand: {escape(_label_map[lvl])}</u>")
+        for dish in groups[lvl]:
+            lines.append(f"{running}. {escape(dish)}")
+            idx_map[running] = dish
+            running += 1
+        lines.append("")  # Leerzeile zwischen Gruppen
+
+    text = pad_message("⭐ <u><b>Deine Favoriten:</b></u>\n\n") + "\n".join(lines).strip()
+    return text, idx_map
+
+
 async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -3602,32 +4755,60 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = q.message
 
     if q.data == "fav_action_back":
+        chat_id = q.message.chat.id
+
+        # 1) Arbeits-UI (Listen/Keyboards der Unter-Loops) entfernen
+        for mid in context.user_data.get("fav_work_ids", []):
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
+                pass
+        context.user_data["fav_work_ids"] = []
+
+        # 2) Die beiden Overview-Nachrichten (Liste + "Was möchtest Du machen?") zuverlässig entfernen
+        ids = context.user_data.get("fav_overview_ids") or {}
+        for key in ("list", "menu"):
+            mid = ids.get(key)
+            if mid:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+        context.user_data.pop("fav_overview_ids", None)
+
+        # 3) Fallback/Alt: evtl. noch in fav_msgs getrackte IDs auch säubern
         for mid in context.user_data.get("fav_msgs", []):
             try:
-                await context.bot.delete_message(chat_id=msg.chat.id, message_id=mid)
-            except:
+                await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+            except Exception:
                 pass
+        context.user_data["fav_msgs"] = []
+
+        # 4) Conversation beenden
         return ConversationHandler.END
 
+
     if q.data == "fav_action_remove":
-        # Direkt Entfernen starten – simuliert wie früher "Ja"
         favs = favorites.get(uid, [])
         if not favs:
             await msg.reply_text("Du hast aktuell keine Favoriten gespeichert.")
             return ConversationHandler.END
 
-        context.user_data["fav_total"] = len(favs)
+        text, idx_map = _build_numbered_grouped_favs(uid)
+        total = len(idx_map)
+
+        # State für diesen Remove-Loop
+        context.user_data["fav_total"] = total
         context.user_data["fav_del_sel"] = set()
+        context.user_data["fav_del_index_map"] = idx_map  # Nummer → Gericht
+
+        # Eine Nachricht mit gruppierter, nummerierter Liste + Zahlen-Keyboard
         list_msg = await msg.reply_text(
-            "Welche Favoriten möchtest Du entfernen?\n" +
-            "\n".join(f"{i}. {d}" for i, d in enumerate(favs, start=1))
+            pad_message(text),
+            reply_markup=build_fav_numbers_keyboard(total, set())
         )
-        sel_msg = await msg.reply_text(
-            "Wähle Nummern (Mehrfachauswahl) und klicke »Fertig«:",
-            reply_markup=build_fav_numbers_keyboard(len(favs), set())
-        )
-        context.user_data["fav_msgs"].extend([list_msg.message_id, sel_msg.message_id])
-        return FAV_ADD_SELECT
+        context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
+        return FAV_DELETE_SELECT
 
     if q.data == "fav_action_select":
         favs = favorites.get(uid, [])
@@ -3635,66 +4816,59 @@ async def fav_action_choice_cb(update: Update, context: ContextTypes.DEFAULT_TYP
             await msg.reply_text("Keine Favoriten vorhanden.")
             return ConversationHandler.END
 
-        context.user_data["fav_total"] = len(favs)
+        text, idx_map = _build_numbered_grouped_favs(uid)
+        total = len(idx_map)
+
+        # State für diesen Select-Loop
+        context.user_data["fav_total"] = total
         context.user_data["fav_sel_sel"] = set()
+        context.user_data["fav_sel_index_map"] = idx_map  # Nummer → Gericht
 
+        # Eine Nachricht mit gruppierter, nummerierter Liste + Zahlen-Keyboard
         list_msg = await msg.reply_text(
-            "Welche Favoriten möchtest Du Deiner Gerichteliste hinzufügen?\n" +
-            "\n".join(f"{i}. {d}" for i, d in enumerate(favs, start=1))
+            pad_message(text),
+            reply_markup=build_fav_selection_keyboard(total, set())
         )
-        sel_msg = await msg.reply_text(
-            "Wähle Nummern (Mehrfachauswahl) und klicke »Fertig«:",
-            reply_markup=build_fav_selection_keyboard(len(favs), set())
-        )
-        context.user_data["fav_msgs"].extend([list_msg.message_id, sel_msg.message_id])
+        context.user_data.setdefault("fav_work_ids", []).append(list_msg.message_id)
         return FAV_ADD_SELECT
-
 
 
 async def fav_selection_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = str(q.from_user.id)
+    chat_id = q.message.chat.id
+
     sel = sorted(context.user_data.get("fav_sel_sel", set()))
-    favs = favorites.get(uid, [])
+    idx_map: dict[int, str] = context.user_data.get("fav_sel_index_map", {}) or {}
 
-    selected = []
-    for idx in sel:
-        if 1 <= idx <= len(favs):
-            selected.append(favs[idx - 1])
+    # Auswahl anhand der fortlaufenden Nummern auflösen
+    selected = [idx_map[i] for i in sel if i in idx_map]
 
-    if not selected:
-        msg_warn = await q.message.reply_text("⚠️ Keine Favoriten ausgewählt.")
-        await asyncio.sleep(1)
+    # Arbeitsnachrichten (Liste + Keyboard) wegräumen
+    for mid in context.user_data.get("fav_work_ids", []):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+    context.user_data["fav_work_ids"] = []
+    context.user_data.pop("fav_sel_sel", None)
+    context.user_data.pop("fav_sel_index_map", None)
 
-        for mid in context.user_data.get("fav_msgs", []):
+    # Auswahl (falls vorhanden) speichern + kurze Info, die wir nach 1.2s wieder löschen
+    if selected:
+        context.user_data["fav_selection"] = selected
+        info = await q.message.reply_text("✅ Auswahl gespeichert. Klicke nun auf <b>Zurück</b> und starte den normalen Suchlauf über <b>Menü</b>")
+        try:
+            await asyncio.sleep(1.8)
+        finally:
             try:
-                await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
-            except:
+                await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+            except Exception:
                 pass
-        try:
-            await msg_warn.delete()
-        except:
-            pass
-        return ConversationHandler.END
 
-    context.user_data["fav_selection"] = selected
-
-    # Aufräumen: Auswahlnachrichten löschen
-    msg_info = await q.message.reply_text("✅ Favoriten gespeichert. Wähle nun im Hauptmenü Deine Gerichteliste.")
-    await asyncio.sleep(1)
-
-    for mid in context.user_data.get("fav_msgs", []):
-        try:
-            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
-        except:
-            pass
-    try:
-        await msg_info.delete()
-    except:
-        pass
-
-    return ConversationHandler.END
+    # Zurück in den Favoriten-Overview-State (keine neue Übersicht posten!)
+    return FAV_OVERVIEW
 
 
 async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3705,45 +4879,57 @@ async def fav_del_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT
     sel.symmetric_difference_update({idx})
     total = context.user_data["fav_total"]
     await q.edit_message_reply_markup(build_fav_numbers_keyboard(total, sel))
-    return FAV_ADD_SELECT
+    #return FAV_ADD_SELECT
+    return FAV_DELETE_SELECT
+
 
 async def fav_del_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
+    q   = update.callback_query
     await q.answer()
     uid = str(q.from_user.id)
+    chat_id = q.message.chat.id
+
+    # Auswahl lesen (fortlaufende Nummern)
     sel = sorted(context.user_data.get("fav_del_sel", set()))
-    favs = favorites.get(uid, [])
+    idx_map: dict[int, str] = context.user_data.get("fav_del_index_map", {}) or {}
 
-    removed = []
-    for idx in sel[::-1]:  # rückwärts löschen, um Indexverschiebung zu vermeiden
-        if 1 <= idx <= len(favs):
-            removed.append(favs.pop(idx - 1))
+    ensure_favorites_loaded(uid)
+    favs = favorites.get(uid, [])[:]
 
-    if removed:
+    # Welche Gerichte sollen entfernt werden?
+    to_remove = {idx_map[i] for i in sel if i in idx_map}
+
+    removed = 0
+    if to_remove:
+        # Reihenfolge der übrigen Favoriten beibehalten
+        favs = [d for d in favs if d not in to_remove]
         favorites[uid] = favs
         store_set_favorites(user_key(int(uid)), favorites[uid])
-        msg_del = await q.message.reply_text(f"🗑️ {len(removed)} Favoriten entfernt.")
-        await asyncio.sleep(1)
+        removed = len(to_remove)
+
+    # Arbeitsnachrichten (Liste + Keyboard) entfernen
+    for mid in context.user_data.get("fav_work_ids", []):
         try:
-            await msg_del.delete()
-        except:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
             pass
-    else:
-        msg_warn = await q.message.reply_text("⚠️ Keine Favoriten entfernt.")
-        await asyncio.sleep(1)
+    context.user_data["fav_work_ids"] = []
+    context.user_data.pop("fav_del_sel", None)
+    context.user_data.pop("fav_del_index_map", None)
+
+    # Kein neues Overview posten!
+    # Wenn etwas entfernt wurde: in-place aktualisieren + Info kurz zeigen (und wieder entfernen)
+    if removed > 0:
+        await fav_render_overview_in_place(update, context, edit_menu=False)
+        info = await q.message.reply_text(f"✅ Du hast {removed} Favorit{'en' if removed != 1 else ''} entfernt.")
+        await asyncio.sleep(1.5)
         try:
-            await msg_warn.delete()
-        except:
+            await context.bot.delete_message(chat_id=chat_id, message_id=info.message_id)
+        except Exception:
             pass
 
-    # Aufräumen: Auswahlnachrichten löschen
-    for mid in context.user_data.get("fav_msgs", []):
-        try:
-            await context.bot.delete_message(chat_id=q.message.chat.id, message_id=mid)
-        except:
-            pass
-
-    return ConversationHandler.END
+    # Ansonsten (Zurück ohne Auswahl): einfach wieder im Overview-State landen
+    return FAV_OVERVIEW
 
 
 
@@ -3758,17 +4944,8 @@ async def fav_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     return FAV_DELETE_SELECT
 
 def build_fav_selection_keyboard(total: int, selected: set[int]) -> InlineKeyboardMarkup:
-    """Zahlen-Tastatur für Selektieren-Modus"""
-    btns = [
-        InlineKeyboardButton(
-            f"{'✅ ' if i in selected else ''}{i}",
-            callback_data=f"fav_sel_{i}"
-        )
-        for i in range(1, total + 1)
-    ]
-    rows = distribute_buttons_equally(btns, max_per_row=7)
-    rows.append([InlineKeyboardButton("Fertig", callback_data="fav_sel_done")])
-    return InlineKeyboardMarkup(rows)
+    """Zahlen-Buttons (max. 7 pro Zeile) für Selektions-Modus + 'Zurück'/'✔️ Fertig'."""
+    return _build_numbers_keyboard(prefix="fav_sel_", total=total, selected=selected, max_per_row=7, done_cb="fav_sel_done", done_label_empty="Zurück", done_label_some="✔️ Fertig")
 
 
 
@@ -3784,50 +4961,6 @@ async def fav_selection_toggle_cb(update: Update, context: ContextTypes.DEFAULT_
 
 
 
-
-
-async def fav_delete_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q   = update.callback_query
-    await q.answer()
-    uid = str(q.from_user.id)
-    sel = sorted(context.user_data.get("fav_del_sel", set()), reverse=True)
-    ensure_favorites_loaded(uid)
-    favs = favorites.get(uid, [])
-
-    # Favoriten löschen
-    for idx in sel:
-        if 1 <= idx <= len(favs):
-            favs.pop(idx - 1)
-    favorites[uid] = favs
-    store_set_favorites(user_key(int(uid)), favorites[uid])
-
-    # alle bisherigen Loop-Nachrichten löschen
-    msg = q.message
-    for mid in context.user_data.get("fav_msgs", []):
-        try:
-            await context.bot.delete_message(chat_id=msg.chat.id, message_id=mid)
-        except:
-            pass
-
-    # falls leer → Hauptmenü & Ende
-    if not favs:
-        await q.message.reply_text("Keine Favoriten vorhanden. Füge diese später hinzu!")
-        await send_main_buttons(q.message)
-        return ConversationHandler.END
-
-    # sonst neue Übersicht + Ja/Nein, IDs neu setzen
-    txt = "⭐ Deine Favoriten:\n" + "\n".join(f"- {d}" for d in favs)
-    m1  = await q.message.reply_text(pad_message(txt))
-    m2  = await q.message.reply_text(
-        "Bearbeiten?",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("Ja",   callback_data="fav_edit_yes"),
-            InlineKeyboardButton("Nein", callback_data="fav_edit_no")
-        ]])
-    )
-    context.user_data["fav_msgs"] = [m1.message_id, m2.message_id]
-    return FAV_OVERVIEW
-
 # ===================================== FAVORITEN–FLOW (hinzufügen)=============================
 
 async def fav_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3838,53 +4971,51 @@ async def fav_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Liste der Gerichte aus user_data holen
     dishes = context.user_data.get("final_list", [])
     if not dishes:
-        return await msg.reply_text("ℹ️ Keine Gerichte verfügbar.")
+        await msg.edit_text("ℹ️ Keine Gerichte verfügbar.")
+        return ConversationHandler.END
 
     # Auswahl initialisieren
     context.user_data["fav_add_sel"]  = set()
     context.user_data["fav_add_msgs"] = []
 
-    # 0) Überschrift mit Erklärung senden + ID speichern
-    header_msg = await msg.reply_text(
-        "🥣 Deine aktuellen Gerichte (* bereits bei den Favoriten)"
-    )
-    context.user_data["fav_add_msgs"].append(header_msg.message_id)
-
-    # 1) Nummerierte Liste senden + ID speichern (Stern bei bestehenden Favoriten)
+    # bestehende Favoriten des Users
     user_id       = str(q.from_user.id)
+    ensure_favorites_loaded(user_id)
     existing_favs = set(favorites.get(user_id, []))
-    list_msg = await msg.reply_text(
-        "\n".join(
-            f"{i+1}. {d}{' *' if d in existing_favs else ''}"
-            for i, d in enumerate(dishes)
-        )
-    )
-    context.user_data["fav_add_msgs"].append(list_msg.message_id)
 
-    # 2) Auswahl-Keyboard senden + ID speichern
-    sel_msg = await msg.reply_text(
-        "Welche Gerichte möchtest Du zu deinen Favoriten hinzufügen?",
-        reply_markup=build_fav_add_numbers_keyboard(len(dishes), set())
+    header_text = pad_message(
+        "Welche(s) Gericht(e) möchtest du deinen Favoriten hinzufügen?\n"
+        "<i>(*Bestehende Favoriten gekennzeichnet)</i>"
     )
-    context.user_data["fav_add_msgs"].append(sel_msg.message_id)
+    kb = build_fav_add_keyboard_dishes(dishes, set(), existing_favs, max_len=35)
+
+    # Aktionsmenü in Kopfzeile + Buttons verwandeln (ersetzt)
+    await msg.edit_text(header_text, reply_markup=kb)
+    context.user_data["fav_add_msgs"].append(msg.message_id)
 
     return FAV_ADD_SELECT
+
 
 
 async def fav_add_number_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     idx = int(q.data.split("_")[-1])
+
     sel = context.user_data.setdefault("fav_add_sel", set())
     # Toggle
     if idx in sel:
         sel.remove(idx)
     else:
         sel.add(idx)
-    # Keyboard updaten
+
     dishes = context.user_data.get("final_list", [])
+    user_id = str(q.from_user.id)
+    ensure_favorites_loaded(user_id)
+    existing_favs = set(favorites.get(user_id, []))
+
     await q.edit_message_reply_markup(
-        build_fav_add_numbers_keyboard(len(dishes), sel)
+        reply_markup=build_fav_add_keyboard_dishes(dishes, sel, existing_favs, max_len=35)
     )
     return FAV_ADD_SELECT
 
@@ -3916,11 +5047,12 @@ async def fav_add_done_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # Favoriten-Übersicht senden
-    txt = "⭐ Deine aktualisierten Favoriten:\n" + "\n".join(f"- {d}" for d in favs)
-    await msg.reply_text(txt)
+    txt = "⭐ Deine aktualisierte Favoritenliste:\n" + "\n".join(f"‣ {d}" for d in favs)
+    favlist_msg = await msg.reply_text(txt)
+    _track_export_msg(context, favlist_msg.message_id)
 
     # Zurück ins Aktions-Menu
-    await send_action_menu(msg)
+    await send_action_menu(msg, context)
     return EXPORT_OPTIONS
 
 
@@ -3961,40 +5093,6 @@ async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await query.edit_message_text("🔄 Alles gelöscht! Nutze /start, um neu zu beginnen.")
 
-
-# ------------------------------------------------------------------
-# /reset – setzt alles für den Nutzer zurück (ausser Favoriten. Siehte unten  5) für favoriten zurücksetzen)
-# ------------------------------------------------------------------
-async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-
-    # 1) Profil entfernen
-    #if uid in profiles:
-    #    del profiles[uid]
-    #    save_profiles()
-
-    # 2) Offene Menü-Session löschen (lokal + Persistenz)
-    if uid in sessions:
-        del sessions[uid]
-    try:
-        store_delete_session(chat_key(int(update.effective_chat.id)))
-    except Exception:
-        pass
-
-    # 3) Wizard-Nachrichten aufräumen (falls gerade ein Loop offen war)
-    await cleanup_prof_loop(context, update.effective_chat.id)
-
-    # 4) Kontext-Speicher leeren
-    context.user_data.clear()
-
-    # 5) Favoriten zurücksetzen
-    #if uid in favorites:
-    #    del favorites[uid]
-    #    save_json(FAVORITES_FILE, favorites)
-
-
-    await update.message.reply_text("🔄 Alles wurde zurückgesetzt. Du kannst neu starten mit /start.")
-    return ConversationHandler.END
 
 
 ##############################################
@@ -4039,7 +5137,7 @@ async def rezept_personen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         zutaten = df[df["Gericht"] == dish].copy()
         zutaten["Menge"] *= personen / 4
         zut_text = "\n".join(
-            f"- {row.Zutat}: {format_amount(row.Menge)} {row.Einheit}"
+            f"‣ {row.Zutat}: {format_amount(row.Menge)} {row.Einheit}"
             for _, row in zutaten.iterrows()
         )
 
@@ -4055,47 +5153,36 @@ Zutaten:
 {zut_text}
 
 Anleitung (kurz Schritt-für-Schritt):"""
-            resp = openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            steps = resp.choices[0].message.content.strip()
+            _client = _get_openai_client()
+            if _client:
+                try:
+                    resp = _client.chat.completions.create(
+                        model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    steps = resp.choices[0].message.content.strip()
+                except Exception as e:
+                    logging.warning("OpenAI-Fehler, nutze Fallback: %s", e)
+                    steps = _fallback_steps(dish, zut_text)
+            else:
+                steps = _fallback_steps(dish, zut_text)
+
             recipe_cache[cache_key] = steps
             save_json(CACHE_FILE, recipe_cache)
 
-        msg = f"""📖 Rezept für *{dish}* für *{personen}* Personen:
-
-*Zutaten:*
-{zut_text}
-
-*Zubereitungszeit:* ca. {time_str}
-
-*Anleitung:*
-{steps}"""
-        await update.message.reply_markdown(msg)
+        msg = (
+            f"📖 Rezept für <b>{escape(dish)}</b> für <b>{personen}</b> Personen:\n\n"
+            f"<b>Zutaten:</b>\n{escape(zut_text)}\n\n"
+            f"<b>Zubereitungszeit:</b> ca. {escape(time_str)}\n\n"
+            f"<b>Anleitung:</b>\n{escape(steps)}"
+        )
+        await update.message.reply_text(msg)
+        
         return ConversationHandler.END
 
     except Exception as e:
         await update.message.reply_text(f"❌ Fehler: {e}")
         return REZEPT_PERSONEN
-
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def do_POST(self):
-        # Verhindert 501 vom Health-Server, solange der PTB-Webhook nicht läuft
-        if self.path.startswith("/webhook/"):
-            self.send_response(204)   # No Content
-        else:
-            self.send_response(404)
-        self.end_headers()
-
-    def log_message(self, format, *args):
-        return
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -4106,14 +5193,32 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 def main():
     print("BUILD_MARK = FIX_WEBHOOK_", __import__("datetime").datetime.utcnow().isoformat())
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).defaults(Defaults(parse_mode=ParseMode.HTML, disable_web_page_preview=True)).build()
+    
+    # --- GLOBAL PRIORITY HANDLERS (immer zuerst) ---
+    # Übersicht-Button "🔄 Restart" (Callback-Flow):
+    app.add_handler(CallbackQueryHandler(restart_start_ov,   pattern="^restart_ov$",                        block=True), group=0)
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov, pattern="^restart_(?:yes_ov|no_ov)$",          block=True), group=0)
+
+    # Slash-/restart mit Bestätigungsfrage + deren Antwort (Callback-Flow wiederverwenden):
+    app.add_handler(CommandHandler(["restart","Restart"], restart_cmd_start,                                 block=True), group=0)
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb, pattern="^restart_(?:yes|no)$",                 block=True), group=0)
+
+    # /reset (mit Bestätigung) – global & priorisiert
+    app.add_handler(CommandHandler(["reset","Reset"], reset_cmd_start, block=True), group=0)
+    app.add_handler(CallbackQueryHandler(reset_confirm_cb, pattern="^(reset_yes|reset_no)$", block=True), group=0)
+
+    app.add_handler(CommandHandler(["status",  "Status"],  status,             block=True), group=0)
+    
+    # ===== Handler-Objekte für ConversationHandler-Fallbacks =====
     cancel_handler = CommandHandler("cancel", cancel)
-    reset_handler  = CommandHandler("reset", reset_command)
+    reset_handler  = CommandHandler("reset", reset_cmd_start)
+
+    # ===== restliche Command-Handler (einmalig, keine Duplikate) =====
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("setup", setup))
     app.add_handler(CommandHandler("tausche", tausche, filters=filters.Regex(r"^\s*/tausche\s+\d"), block=True))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("reset", reset_command))
+    #app.add_handler(CommandHandler("status", status)) brauchts nicht mehr, ist schon oben drin
     app.add_handler(CommandHandler("favorit", favorit))
     #app.add_handler(CommandHandler("meinefavoriten", meinefavoriten))
     app.add_handler(CommandHandler("delete", delete))
@@ -4128,21 +5233,24 @@ def main():
             CallbackQueryHandler(menu_start_cb, pattern="^restart_menu$")
         ],
         states={
-            PROFILE_CHOICE: [CallbackQueryHandler(profile_choice_cb, pattern="^prof_")],
+            PROFILE_CHOICE: [CallbackQueryHandler(profile_choice_cb, pattern=r"^prof_(?:exist|nolim|new|show)$")],
             PROFILE_NEW_A: [CallbackQueryHandler(profile_new_a_cb, pattern="^res_")],
             PROFILE_NEW_B: [CallbackQueryHandler(profile_new_b_cb, pattern="^style_")],
             PROFILE_NEW_C: [CallbackQueryHandler(profile_new_c_cb, pattern="^weight_")],
-            PROFILE_OVERVIEW: [CallbackQueryHandler(profile_overview_cb, pattern="^prof_(over|next)")],
+            PROFILE_OVERVIEW: [CallbackQueryHandler(profile_overview_cb, pattern=r"^prof_(?:overwrite|back)$")],
             MENU_INPUT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, menu_input)],
             ASK_CONFIRM:   [CallbackQueryHandler(menu_confirm_cb, pattern="^confirm_")],
             ASK_BEILAGEN:  [CallbackQueryHandler(ask_beilagen_cb)],
             SELECT_MENUES:   [CallbackQueryHandler(select_menus_cb)],
-            BEILAGEN_SELECT: [CallbackQueryHandler(beilage_select_cb)],
+            BEILAGEN_SELECT: [
+                CallbackQueryHandler(restart_start,           pattern="^restart$"),
+                CallbackQueryHandler(beilage_select_cb,       pattern=r"^beilage_(\d+|done)$"),
+            ],
             ASK_FINAL_LIST:  [CallbackQueryHandler(ask_final_list_cb)],
             ASK_SHOW_LIST:   [CallbackQueryHandler(ask_showlist_cb)],
             PERSONS_SELECTION: [
                         CallbackQueryHandler(persons_selection_cb, pattern="^persons_page_(low|high)$"),
-                        CallbackQueryHandler(persons_selection_cb, pattern="^persons_\\d+$"),
+                        CallbackQueryHandler(persons_selection_cb, pattern="^persons_(\d+|done)$"),
             ],
             PERSONS_MANUAL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, persons_manual_cb)],
             TAUSCHE_SELECT:  [CallbackQueryHandler(tausche_select_cb,   pattern=r"^swap_(sel:\d+|done)$")],
@@ -4162,7 +5270,7 @@ def main():
             ],
             FAV_ADD_SELECT: [
                         CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"),
-                        CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"),
+                        CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"),
                         CallbackQueryHandler(fav_selection_toggle_cb,   pattern=r"^fav_sel_\d+$"),
                         CallbackQueryHandler(fav_selection_done_cb,     pattern="^fav_sel_done$")
             ],
@@ -4175,18 +5283,18 @@ def main():
     #### ---- Globale Handler ----
 
     #app.add_handler(CallbackQueryHandler(start_favs_cb,   pattern="^start_favs$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^start_setup$"))
+    app.add_handler(CallbackQueryHandler(start_setup_cb, pattern=r"^(start|restart)_setup$"))
     app.add_handler(CallbackQueryHandler(setup_ack_cb,    pattern="^setup_ack$"))
     app.add_handler(CallbackQueryHandler(fav_add_start,    pattern="^favoriten$"))
     app.add_handler(CallbackQueryHandler(export_to_bring,  pattern="^export_bring$"))
     app.add_handler(CallbackQueryHandler(export_to_pdf,    pattern="^export_pdf$"))
     app.add_handler(CallbackQueryHandler(process_pdf_export_choice, pattern="^pdf_export_"))
     app.add_handler(CallbackQueryHandler(restart_start,    pattern="^restart$"))
-    app.add_handler(CallbackQueryHandler(restart_confirm_cb, pattern="^restart_yes$|^restart_no$"))
+    app.add_handler(CallbackQueryHandler(restart_start_ov, pattern="^restart_ov$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_cb,  pattern="^restart_(yes|no)$"))
+    app.add_handler(CallbackQueryHandler(restart_confirm_ov,  pattern="^restart_(yes|no)_ov$"))
     app.add_handler(CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"))
-    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"))
-    app.add_handler(CallbackQueryHandler(start_setup_cb,  pattern="^restart_setup$"))
-
+    app.add_handler(CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"))
 
 
     #### ---- QuickOne-Conversation ----
@@ -4200,6 +5308,7 @@ def main():
         states={
             QUICKONE_START:    [CallbackQueryHandler(quickone_start,    pattern="^start_quickone$")],
             QUICKONE_CONFIRM:  [CallbackQueryHandler(quickone_confirm_cb,pattern="^quickone_")],
+            BEILAGEN_SELECT:   [CallbackQueryHandler(beilage_select_cb,  pattern=r"^beilage_(\d+|done)$")],  # ← NEU
             PERSONS_SELECTION: [CallbackQueryHandler(persons_selection_cb,pattern="^persons_")],
             PERSONS_MANUAL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, persons_manual_cb)],
         },
@@ -4218,7 +5327,7 @@ def main():
             CallbackQueryHandler(fav_start,    pattern="^start_favs$"),
             CallbackQueryHandler(fav_start,              pattern="^restart_favs$"),
             # neu: Einstieg über Aktions-Menu
-            CallbackQueryHandler(fav_add_start, pattern="^favoriten$")
+            #CallbackQueryHandler(fav_add_start, pattern="^favoriten$")   gelöscht am 23/9, weil im globalen handler bereits drin...: "Behalte die Verarbeitung im Haupt-ConversationHandler (weil sie logisch dort hingehört) und lösche die Entry-Point-Zeile im Favoriten-Conversation."
         ],
         states={
             FAV_OVERVIEW: [
@@ -4228,14 +5337,14 @@ def main():
             ],
             FAV_DELETE_SELECT: [
                 CallbackQueryHandler(fav_number_toggle_cb, pattern=r"^fav_del_\d+$"),
-                CallbackQueryHandler(fav_delete_done_cb,   pattern="^fav_del_done$"),
+                CallbackQueryHandler(fav_del_done_cb,      pattern="^fav_del_done$"),
                 CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_yes$"),
                 CallbackQueryHandler(fav_overview_cb,      pattern="^fav_edit_no$")
             ],
             # neu: Favoriten hinzufügen-Loop
             FAV_ADD_SELECT: [
                 CallbackQueryHandler(fav_add_number_toggle_cb, pattern=r"^fav_add_\d+$"),
-                CallbackQueryHandler(fav_add_done_cb,          pattern="^fav_add_done$"),
+                CallbackQueryHandler(fav_add_done_cb,          pattern=r"^fav_add_done$"),
                 CallbackQueryHandler(fav_selection_toggle_cb,  pattern=r"^fav_sel_\d+$"),
                 CallbackQueryHandler(fav_selection_done_cb,    pattern="^fav_sel_done$"),
                 CallbackQueryHandler(fav_del_number_toggle_cb, pattern=r"^fav_del_\d+$"), 
@@ -4295,17 +5404,24 @@ def main():
         print(f"▶️ Cloud Run Webhook auf :{port} → {webhook_url}")
 
         aio = web.Application()
+        aio.router.add_get("/", _health_route)
         aio.router.add_get("/webhook/health", _health_route)
         aio.router.add_post(path, _telegram_webhook)
 
         async def _on_startup(_app):
-            await app.initialize()
+            try:
+                await app.initialize()
+            except Exception as e:
+                print(f"❌ app.initialize() fehlgeschlagen: {e}")
+                # HTTP-Server trotzdem starten, damit Health/Logs verfügbar sind
+                return
             try:
                 await app.bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
                 print("✅ set_webhook OK")
             except Exception as e:
                 print(f"⚠️ set_webhook failed: {e} — continuing without blocking startup")
             await app.start()
+
 
         async def _on_cleanup(_app):
             await app.stop()

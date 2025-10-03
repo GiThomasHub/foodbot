@@ -3,6 +3,7 @@ FROM python:3.11-slim
 # Schnelle, saubere Logs
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONOPTIMIZE=1 \
     PORT=8080
 
 # Fonts für PDF (DejaVu)
